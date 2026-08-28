@@ -1,0 +1,37 @@
+// Windows VERSIONINFO resource for MGO exported shared libraries.
+// Compiled into each MGO DLL (see mgo_set_library_version in CMakeLists.txt)
+// so File Version / Product Version / Legal Copyright are visible in
+// Explorer, dumpbin, and version APIs.  Linux/macOS use VERSION/SOVERSION
+// instead (no .rc there).
+
+#include <windows.h>
+#include "MGOVersion.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MGO_VERSION_FILE
+ PRODUCTVERSION MGO_VERSION_FILE
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Johnlyon"
+            VALUE "FileDescription", "MGO shared library"
+            VALUE "FileVersion", MGO_VERSION_STRING
+            VALUE "InternalName", "MGO"
+            VALUE "LegalCopyright", MGO_COPYRIGHT_STRING
+            VALUE "OriginalFilename", ""
+            VALUE "ProductName", "MGO - Mesh Generation Optimizer"
+            VALUE "ProductVersion", MGO_VERSION_STRING
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

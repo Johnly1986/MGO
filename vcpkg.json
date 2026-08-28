@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/buildsystems/vcpkg.schema.json",
+  "name": "mgo",
+  "version": "1.0.0",
+  "description": "Mesh Generation Optimizer — 3D tile conversion toolkit for digital twin workflows",
+  "dependencies": [
+    "boost-regex",
+    "eigen3",
+    { "name": "gdal", "default-features": false },
+    "libjpeg-turbo",
+    "libpng",
+    "nlohmann-json",
+    "proj",
+    "tiff",
+    "zlib"
+  ],
+  "builtin-baseline": "8f57207a8a1b96a4a864e11f85d57b0a252b3ac3"
+}
