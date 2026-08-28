@@ -12,6 +12,12 @@ on:
         description: '已有 tag 名称（如 v0.7.0.1），留空则使用触发的 ref'
         required: false
         default: ''
+      os:
+        description: '仅构建指定平台（调试用）'
+        required: false
+        default: 'all'
+        type: choice
+        options: [all, linux, windows]
 
 permissions:
   contents: write
@@ -19,6 +25,7 @@ permissions:
 jobs:
   # ------------------------------------------------------------------ Linux
   linux:
+    if: github.event.inputs.os == '' || github.event.inputs.os == 'all' || github.event.inputs.os == 'linux'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +105,7 @@ jobs:
 
   # ---------------------------------------------------------------- Windows
   windows:
+    if: github.event.inputs.os == '' || github.event.inputs.os == 'all' || github.event.inputs.os == 'windows'
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -187,6 +195,7 @@ jobs:
   # ------------------------------------------------- licenses + GitHub Release
   release:
     needs: [linux, windows]
+    if: always() && needs.linux.result != 'failure' && needs.windows.result != 'failure' && (needs.linux.result == 'success' || needs.windows.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
