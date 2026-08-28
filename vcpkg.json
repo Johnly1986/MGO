@@ -14,5 +14,8 @@
     "tiff",
     "zlib"
   ],
-  "builtin-baseline": "8f57207a8a1b96a4a864e11f85d57b0a252b3ac3"
+  "builtin-baseline": "8f57207a8a1b96a4a864e11f85d57b0a252b3ac3",
+  "overrides": [
+    { "name": "eigen3", "version": "3.4.0" }
+  ]
 }
