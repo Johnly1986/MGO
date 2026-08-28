@@ -1,0 +1,220 @@
+name: Release
+
+# 发布流水线：推送 v* tag 时自动构建 Linux / Windows 二进制包并发布到 GitHub Release。
+# 也可手动触发（workflow_dispatch），指定已存在的 tag 重新发布。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已有 tag 名称（如 v0.7.0.1），留空则使用触发的 ref'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  # ------------------------------------------------------------------ Linux
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag != '' && inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          TAG="${{ inputs.tag != '' && inputs.tag || github.ref_name }}"
+          echo "tag=$TAG"     >> $GITHUB_OUTPUT
+          echo "ver=${TAG#v}" >> $GITHUB_OUTPUT
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build patchelf \
+            libboost-regex-dev \
+            libproj-dev \
+            libeigen3-dev \
+            libtiff-dev \
+            libjpeg-dev \
+            libpng-dev \
+            zlib1g-dev \
+            libgdal-dev \
+            nlohmann-json3-dev \
+            libopenscenegraph-dev
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+      - name: Package
+        id: pack
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          set -euo pipefail
+          DIR="MGO-${VER}-linux-x64"
+          STAGE="dist/$DIR"
+          mkdir -p "$STAGE"
+
+          # 主程序 + 本项目共享库（cp -L 解引用 SONAME 符号链接）
+          cp -L build/bin/MGOConsole "$STAGE/"
+          cp -L build/lib*.so.1       "$STAGE/"
+
+          # FetchContent 构建出的 assimp（非系统库，必须随包携带）
+          cp -L build/_deps/assimp-build/bin/libassimp.so.6 "$STAGE/"
+
+          # 统一设置 RUNPATH 为 $ORIGIN，解压即可运行（PROJ/GDAL/OSG 走系统库）
+          for f in "$STAGE"/MGOConsole "$STAGE"/*.so*; do
+            patchelf --set-rpath '$ORIGIN' "$f"
+          done
+
+          # 自检
+          "$STAGE/MGOConsole" --version
+
+          tar -czf "dist/${DIR}.tar.gz" -C dist "$DIR"
+          rm -rf "$STAGE"
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mgo-linux
+          path: dist/*.tar.gz
+
+  # ---------------------------------------------------------------- Windows
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag != '' && inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = if ('${{ inputs.tag }}' -ne '') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          "tag=$tag"       | Out-File $env:GITHUB_OUTPUT -Append
+          "ver=$($tag -replace '^v','')" | Out-File $env:GITHUB_OUTPUT -Append
+
+      - name: Configure (vcpkg manifest, OSG off)
+        run: cmake -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DMGO_WITH_OSG=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release
+
+      - name: Test (non-blocking)
+        shell: cmd
+        run: cd build && ctest --output-on-failure -C Release
+        continue-on-error: true
+
+      - name: Package
+        shell: pwsh
+        env:
+          VER: ${{ steps.ver.outputs.ver }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir   = "MGO-$env:VER-win-x64"
+          $stage = "dist\$dir"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          # 主程序 + 本项目 DLL + assimp DLL（递归搜索 build 树，兼容多配置布局）
+          Get-ChildItem -Recurse build -Include 'MGOConsole.exe','*.dll' |
+            Where-Object { $_.FullName -notmatch '\\CMakeFiles\\|compilerId' } |
+            Copy-Item -Destination $stage
+
+          # PROJ 数据库：MGO 运行时优先在 exe 同目录查找 proj.db，直接放包根即可。
+          # 同时以它反推 vcpkg installed 根（manifest 模式默认在 build/vcpkg_installed）
+          $projDb = Get-ChildItem -Recurse -Filter proj.db | Select-Object -First 1
+          if (-not $projDb) { throw 'proj.db not found under vcpkg installed tree' }
+          $projShare = $projDb.Directory.FullName
+          $installedRoot = $projShare -replace '[\\/]+share[\\/]+proj$',''
+
+          # vcpkg 依赖运行时 DLL（PROJ / GDAL / Boost / TIFF / JPEG / PNG / zlib ...）
+          Copy-Item (Join-Path $installedRoot 'bin\*.dll') $stage
+
+          Copy-Item (Join-Path $projShare '*') $stage
+
+          # GDAL 数据目录（可选，个别驱动需要；通过 GDAL_DATA 环境变量启用）
+          $gdalData = Join-Path $installedRoot 'share\gdal'
+          if (Test-Path $gdalData) { Copy-Item $gdalData "$stage\gdaldata" -Recurse }
+
+          @"
+          MGO $env:VER - Windows x64
+          ==========================================
+          运行要求: Visual C++ Redistributable 2015-2022 (x64)
+
+          直接运行 MGOConsole.exe 即可（DLL 与 proj.db 已随包携带）。
+          如个别 GDAL 驱动提示找不到数据文件, 先设置:
+              set GDAL_DATA=%~dp0gdaldata
+
+          第三方库许可见 THIRD_PARTY_LICENSES.txt。
+          "@ | Set-Content "$stage\README.txt" -Encoding UTF8
+
+          # 自检
+          & "$stage\MGOConsole.exe" --version
+
+          Push-Location dist
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          Pop-Location
+          Get-ChildItem dist\*.zip | Select-Object Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mgo-windows
+          path: dist/*.zip
+
+  # ------------------------------------------------- licenses + GitHub Release
+  release:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach third-party license notice
+        env:
+          TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+        run: |
+          cat > dist/THIRD_PARTY_LICENSES.txt <<'EOF'
+          MGO bundles the following third-party components.
+          MGO itself is licensed under the Apache License 2.0 (see LICENSE).
+
+            Assimp 6.0.5        Apache-2.0   https://github.com/assimp/assimp
+            PROJ 9.x            MIT/X-like   https://github.com/OSGeo/PROJ
+            GDAL 3.x            MIT          https://github.com/OSGeo/gdal
+            Boost               BSL-1.0      https://www.boost.org/LICENSE_1_0.txt
+            Eigen 3.4           MPL2         https://www.mozilla.org/en-US/MPL/2.0/
+            libtiff             HP-style     https://gitlab.com/libtiff/libtiff
+            libjpeg-turbo       IJG/BSD      https://github.com/libjpeg-turbo/libjpeg-turbo
+            libpng              zlib-like    https://github.com/glennrp/libpng/blob/libpng16/LICENSE
+            zlib                zlib         https://github.com/madler/zlib/blob/master/zlib.h
+            nlohmann/json       MIT          https://github.com/nlohmann/json
+            OpenSceneGraph 3.6  OSG License  https://openscenegraph.github.io/openscenegraph.io/ (Linux build only)
+
+          On Linux, PROJ/GDAL/Boost/OpenSceneGraph/libtiff/libjpeg/libpng/zlib are
+          NOT bundled: they are loaded from the system (install the matching -dev
+          packages). Only MGO libraries and Assimp are shipped in the archive.
+          Full license texts are available at the upstream URLs above and in the
+          source tree of each component.
+          EOF
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          files: dist/*
+          generate_release_notes: true
+          prerelease: ${{ contains(inputs.tag != '' && inputs.tag || github.ref_name, '-') }}
