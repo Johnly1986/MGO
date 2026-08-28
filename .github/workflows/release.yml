@@ -63,6 +63,9 @@ jobs:
           VER: ${{ steps.ver.outputs.ver }}
         run: |
           set -euo pipefail
+          # 失败时把出错命令写进 annotation（无需日志权限即可定位）
+          trap 'echo "::error::Package failed at: $BASH_COMMAND"' ERR
+
           DIR="MGO-${VER}-linux-x64"
           STAGE="dist/$DIR"
           mkdir -p "$STAGE"
@@ -71,8 +74,10 @@ jobs:
           cp -L build/bin/MGOConsole "$STAGE/"
           cp -L build/lib*.so.1       "$STAGE/"
 
-          # FetchContent 构建出的 assimp（非系统库，必须随包携带）
-          cp -L build/_deps/assimp-build/bin/libassimp.so.6 "$STAGE/"
+          # FetchContent 构建出的 assimp（非系统库，必须随包携带；路径随构建配置变化，用 find 定位）
+          ASSIMP=$(find build/_deps -name 'libassimp.so*' -type f,l | head -1)
+          echo "assimp lib: $ASSIMP"
+          cp -L "$ASSIMP" "$STAGE/libassimp.so.6"
 
           # 统一设置 RUNPATH 为 $ORIGIN，解压即可运行（PROJ/GDAL/OSG 走系统库）
           for f in "$STAGE"/MGOConsole "$STAGE"/*.so*; do
@@ -124,6 +129,7 @@ jobs:
           VER: ${{ steps.ver.outputs.ver }}
         run: |
           $ErrorActionPreference = 'Stop'
+          try {
           $dir   = "MGO-$env:VER-win-x64"
           $stage = "dist\$dir"
           New-Item -ItemType Directory -Force $stage | Out-Null
@@ -168,6 +174,10 @@ jobs:
           Compress-Archive -Path $dir -DestinationPath "$dir.zip"
           Pop-Location
           Get-ChildItem dist\*.zip | Select-Object Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+          } catch {
+            "::error::Package failed: $($_.Exception.Message)" | Write-Host
+            throw
+          }
 
       - uses: actions/upload-artifact@v4
         with:
