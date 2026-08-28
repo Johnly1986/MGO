@@ -121,6 +121,7 @@ jobs:
           "ver=$($tag -replace '^v','')" | Out-File $env:GITHUB_OUTPUT -Append
 
       - name: Configure (vcpkg manifest, OSG off)
+        shell: pwsh
         run: cmake -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DMGO_WITH_OSG=OFF -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
