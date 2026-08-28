@@ -5,6 +5,8 @@
   "description": "Mesh Generation Optimizer — 3D tile conversion toolkit for digital twin workflows",
   "dependencies": [
     "boost-regex",
+    "boost-algorithm",
+    "boost-tokenizer",
     "eigen3",
     { "name": "gdal", "default-features": false },
     "libjpeg-turbo",
