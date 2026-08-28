@@ -14,7 +14,7 @@ If you have tried to put design-stage engineering models or survey data on a Ces
 - **DEM / DOM data doesn't stream.** GeoTIFF heightmaps and orthophotos must become Quantized-Mesh terrain and TMS tile pyramids before a browser can render them efficiently.
 - **Models are too heavy.** Survey and BIM meshes routinely carry 10-100x more triangles than a web client can draw; simplification must be georeference-aware and crack-free across tile borders.
 
-MGO solves all of the above with one CLI:
+MGO solves all the aforementioned problems with a command-line interface (CLI). Hereinafter, MGO (MGOConsole) will be used as an alias for the main program:
 
 ```
 mgo mesh     - mesh simplification + coordinate projection
