@@ -132,10 +132,44 @@ jobs:
 
       - name: Configure (vcpkg manifest, OSG off)
         shell: pwsh
-        run: cmake -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DMGO_WITH_OSG=OFF -DCMAKE_BUILD_TYPE=Release
+        run: |
+          cmake -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows -DMGO_WITH_OSG=OFF -DCMAKE_BUILD_TYPE=Release *>&1 | Tee-Object configure.log
+          exit $LASTEXITCODE
+
+      - name: Configure diagnostics (public-visible)
+        if: failure()
+        shell: pwsh
+        run: |
+          $tail = @()
+          if (Test-Path configure.log) {
+            $errs = Select-String -Path configure.log -Pattern 'error C|CMake Error|FAILED|error: ' |
+              Select-Object -Last 10 | ForEach-Object { $_.Line.Trim() }
+            $tail = @($errs) + @('...... tail of configure.log ......') + @(Get-Content configure.log -Tail 40 | ForEach-Object { $_.Trim() })
+          } else {
+            $tail = @('configure.log missing')
+          }
+          $msg = ($tail | Where-Object { $_ } | Select-Object -First 55) -join '%0A'
+          $msg = $msg.Substring(0, [Math]::Min($msg.Length, 3500))
+          Write-Host "::error::WinConfigure:%0A$msg"
 
       - name: Build
-        run: cmake --build build --config Release
+        shell: pwsh
+        run: |
+          cmake --build build --config Release *>&1 | Tee-Object build.log
+          exit $LASTEXITCODE
+
+      - name: Build diagnostics (public-visible)
+        if: failure()
+        shell: pwsh
+        run: |
+          if (Test-Path build.log) {
+            $errs = Select-String -Path build.log -Pattern 'error [A-Z]+\d+|fatal error|CMake Error' |
+              Select-Object -First 12 | ForEach-Object { $_.Line.Trim() }
+            if (-not $errs) { $errs = Get-Content build.log -Tail 30 | ForEach-Object { $_.Trim() } }
+            $msg = ($errs | Where-Object { $_ } | Select-Object -First 15) -join '%0A'
+            $msg = $msg.Substring(0, [Math]::Min($msg.Length, 3500))
+            Write-Host "::error::WinBuild:%0A$msg"
+          } else { Write-Host '::error::WinBuild: build.log missing' }
 
       - name: Test (non-blocking)
         shell: cmd
