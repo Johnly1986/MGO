@@ -45,7 +45,27 @@ find_package(Eigen3 3.4.0 REQUIRED)
 find_package(TIFF REQUIRED)               # CMake FindTIFF lacks version support
 find_package(GDAL REQUIRED)
 find_package(JPEG REQUIRED)               # CMake FindJPEG lacks version support
-find_package(PNG REQUIRED)                # CMake FindPNG lacks version support
+
+# ---- PNG ----
+# vcpkg's libpng installs the upstream CMake CONFIG package under the name
+# "libpng" (which itself defines the PNG::PNG target), while CMake's built-in
+# FindPNG *module* covers system/apt/brew installs.  Depending on CMake version
+# and toolchain, `find_package(PNG REQUIRED)` can fail into a CONFIG-mode error
+# ("Could not find a package configuration file ... PNGConfig.cmake") on vcpkg.
+# Try module → CONFIG(PNG) → CONFIG(libpng); hard-fail only if none yields
+# PNG::PNG.  Behavior-preserving on platforms where FindPNG already works.
+find_package(PNG QUIET)
+if(NOT TARGET PNG::PNG)
+    find_package(PNG QUIET CONFIG)
+endif()
+if(NOT TARGET PNG::PNG)
+    find_package(libpng QUIET CONFIG)      # vcpkg; defines PNG::PNG
+endif()
+if(NOT TARGET PNG::PNG)
+    message(FATAL_ERROR
+        "libpng not found: tried FindPNG module, PNG CONFIG and libpng CONFIG. "
+        "Install libpng (apt: libpng-dev, brew: libpng, vcpkg: libpng).")
+endif()
 find_package(ZLIB 1.3.0 REQUIRED)
 
 # ---- nlohmann::json (header-only) ----

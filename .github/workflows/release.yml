@@ -140,15 +140,22 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          $tail = @()
+          $blocks = @()
           if (Test-Path configure.log) {
-            $errs = Select-String -Path configure.log -Pattern 'error C|CMake Error|FAILED|error: ' |
-              Select-Object -Last 10 | ForEach-Object { $_.Line.Trim() }
-            $tail = @($errs) + @('...... tail of configure.log ......') + @(Get-Content configure.log -Tail 40 | ForEach-Object { $_.Trim() })
+            # 抓每个 CMake Error 标题 + 其后 12 行正文（真正的 "Could NOT find X (missing:...)" 在标题后）
+            $lines = Get-Content configure.log
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match 'CMake Error|Could NOT find|Could not find') {
+                $blocks += ,($lines[$i..[Math]::Min($i+12, $lines.Count-1)])
+                $i += 13
+                if ($blocks.Count -ge 2) { break }
+              }
+            }
+            if ($blocks.Count -eq 0) { $blocks += ,(Get-Content configure.log -Tail 30) }
           } else {
-            $tail = @('configure.log missing')
+            $blocks += ,@('configure.log missing')
           }
-          $msg = ($tail | Where-Object { $_ } | Select-Object -First 55) -join '%0A'
+          $msg = (($blocks | ForEach-Object { $_.Trim() }) -join '%0A')
           $msg = $msg.Substring(0, [Math]::Min($msg.Length, 3500))
           Write-Host "::error::WinConfigure:%0A$msg"
 
