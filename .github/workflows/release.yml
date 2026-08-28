@@ -81,8 +81,18 @@ jobs:
           cp -L build/bin/MGOConsole "$STAGE/"
           cp -L build/lib*.so.1       "$STAGE/"
 
-          # FetchContent 构建出的 assimp（非系统库，必须随包携带；路径随构建配置变化，用 find 定位）
-          ASSIMP=$(find build/_deps -name 'libassimp.so*' -type f,l | head -1)
+          # FetchContent 构建出的 assimp（非系统库，必须随包携带）。
+          # 路径不硬编码：用 ldd 查询 MGOConsole 实际解析到的 libassimp，
+          # 兜底再全 build 树 find（不同缓存来源的目录布局可能不同）
+          ASSIMP=$(ldd build/bin/MGOConsole 2>/dev/null | awk '/libassimp/ {print $3; exit}')
+          if [ -z "$ASSIMP" ] || [ ! -e "$ASSIMP" ]; then
+            ASSIMP=$(find build -name 'libassimp.so.*' ! -type d ! -name 'libassimp.so' | sort | head -1)
+          fi
+          if [ -z "$ASSIMP" ] || [ ! -e "$ASSIMP" ]; then
+            C=$(find build -iname '*assimp*.so*' ! -type d 2>/dev/null | tr '\n' ';' | head -c 500)
+            echo "::error::libassimp not found; assimp artifacts in build tree: ${C:-none}"
+            exit 1
+          fi
           echo "assimp lib: $ASSIMP"
           cp -L "$ASSIMP" "$STAGE/libassimp.so.6"
 
