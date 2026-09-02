@@ -1,7 +1,8 @@
 # MGO - Mesh Generation Optimizer
 
-[![Build & Test](https://github.com/Johnly1986/MGO/actions/workflows/build.yml/badge.svg)](https://github.com/Johnly1986/MGO/actions/workflows/build.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#)
+[![Build & Test](https://github.com/Johnly1986/MGO/actions/workflows/build.yml/badge.svg)](https://github.com/Johnly1986/MGO/actions/workflows/build.yml)
 
 MGO is a cross-platform (Windows / Linux) C++17 command-line toolkit that turns engineering-grade 3D models and geospatial raster data into web-streamable 3D Tiles - built for digital twin, BIM+GIS integration, and reality-modeling workflows.
 
