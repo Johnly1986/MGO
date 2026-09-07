@@ -52,15 +52,40 @@ struct TileBuildOptions
 };
 
 // ---------------------------------------------------------------------------
+// PropertySchemaField/PropertySchema/BimValue/BimPropertyRow are defined in
+// ../MeshProjectionErrorCorrector/TileDataTypes.h (imported above).
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// BatchTableWriter — PropertySchema + rows -> Batch Table JSON/binary
+// (BIM_BINDING_ARCHITECTURE.md §4.3-⑥). Column three-state rule:
+//   all rows non-null numeric/Vec3 -> binary column;
+//   any null / string / bool      -> JSON array (null allowed);
+//   all null                      -> column omitted.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
 // GlbBuilder — binary glTF construction
 // ---------------------------------------------------------------------------
 class TILE_BUILDER_API GlbBuilder
 {
 public:
+    // Optional BIM batch-id context: when provided with batchLength > 0, a
+    // _BATCHID vertex attribute is appended per primitive. The per-vertex
+    // values themselves travel inside MergedMeshGroup::batchIds (populated by
+    // GroupCellByMaterial from MeshInstance::properties); batchLength (the
+    // tile's feature-row count) only drives the componentType ladder
+    // 5121/5123/5126 — UNSIGNED_INT(5125) is forbidden for vertex attributes.
+    struct BatchIdContext
+    {
+        uint32_t batchLength = 0;   // rows in the tile's feature batch (0 = disabled)
+    };
+
     static bool Build(const std::vector<MergedMeshGroup>& groups,
                       BinaryBlob& outGlb,
                       const std::string& textureBaseDir,
-                      bool doubleSided);
+                      bool doubleSided,
+                      const BatchIdContext* bim = nullptr);
 };
 
 // ---------------------------------------------------------------------------
@@ -69,8 +94,44 @@ public:
 class TILE_BUILDER_API B3dmBuilder
 {
 public:
+    // Legacy signature: BATCH_LENGTH=0, no batch table (byte-identical when
+    // binding disabled).
     static bool Build(const BinaryBlob& glb, BinaryBlob& outB3dm);
+
+    // BIM signature: writes FeatureTable JSON with BATCH_LENGTH + optional
+    // Batch Table. All sections end on 8-byte boundaries measured from the
+    // tile start (absolute rule — see implementation note); header length
+    // fields include chunk padding so consumers can sum them to find glb.
+    static bool Build(const BinaryBlob& glb,
+                      uint32_t batchLength,
+                      const std::string& batchTableJson,
+                      const std::vector<uint8_t>& batchTableBinary,
+                      BinaryBlob& outB3dm);
+
     static void PadTo8(std::vector<uint8_t>& buf);
+};
+
+// ---------------------------------------------------------------------------
+// BatchTableWriter — schema + rows -> Batch Table (JSON + binary)
+// ---------------------------------------------------------------------------
+class TILE_BUILDER_API BatchTableWriter
+{
+public:
+    // Writes the Batch Table for one tile.
+    //   rows         — deduplicated feature rows (row i == batchId i)
+    //   outNullified — optional count of NaN/±Inf property values nulled out
+    //     (columns containing them are demoted to JSON per BIM doc §4.3-⑧ /
+    //     §4.8(3); legacy Batch Table has no INT64 binary type, so Int64
+    //     values beyond int32 range stay JSON as exact digits).
+    // Binary column mapping (doc §4.8(3)):
+    //   Int32 / Int64-fits-int32 -> INT(5124); Double -> DOUBLE(5128);
+    //   Vec3 -> VEC3/FLOAT(5126); Bool / String / any column with nulls or
+    //   non-finite values -> JSON array.
+    // Returns false on internal errors (empty schema with non-empty rows).
+    static bool Build(const std::vector<std::shared_ptr<const BimPropertyRow>>& rows,
+                      std::string& outJson,
+                      std::vector<uint8_t>& outBinary,
+                      size_t* outNullified = nullptr);
 };
 
 // ---------------------------------------------------------------------------

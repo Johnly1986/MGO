@@ -447,7 +447,7 @@ bool OSGBConverter::WriteOutput(GridCell* root,
         {
             WriteOSGBTiles(*cell, opts, subdir, tileCount);
             ++done;
-            std::cout << "[OSGBConverter] 处理进度: " << done << "/"
+            std::cout << "[OSGBConverter] Progress: " << done << "/"
                       << contentCells.size() << std::endl;
         }
     }
@@ -473,7 +473,7 @@ bool OSGBConverter::WriteOutput(GridCell* root,
                 }));
             }
             for (auto& f : futures) f.get();
-            std::cout << "[OSGBConverter] 处理进度: " << end << "/"
+            std::cout << "[OSGBConverter] Progress: " << end << "/"
                       << contentCells.size() << std::endl;
         }
     }
@@ -496,7 +496,7 @@ bool OSGBConverter::WriteOutput(GridCell* root,
         return false;
     }
 
-    std::cout << "[OSGBConverter] 处理完成: " << tileCountVal << " tile(s) → "
+    std::cout << "[OSGBConverter] Done: " << tileCountVal << " tile(s) -> "
               << opts.outputDir << "/tileset.json" << std::endl;
 
     return true;

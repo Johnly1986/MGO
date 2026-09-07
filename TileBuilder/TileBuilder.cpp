@@ -19,12 +19,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cstdint>
+#include <climits>
 #include <cfloat>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include "../MeshProjectionErrorCorrector/Log.hpp"
 #include <map>
+#include <iomanip>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -125,10 +128,21 @@ namespace
 bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
                        BinaryBlob& outGlb,
                        const std::string& textureBaseDir,
-                       bool doubleSided)
+                       bool doubleSided,
+                       const BatchIdContext* bim)
 {
     outGlb.data.clear();
     if (groups.empty()) return false;
+
+    const bool writeBatchIds = bim && bim->batchLength > 0;
+
+    // Component type ladder for _BATCHID (glTF forbids UNSIGNED_INT(5125)
+    // for vertex attributes): <=255 -> UNSIGNED_BYTE, <=65535 -> UNSIGNED_SHORT,
+    // else FLOAT (int-precise to 2^24, far above per-tile feature counts).
+    uint32_t batchComponentType = 5126;
+    size_t   batchComponentSize = 4;
+    if (bim && bim->batchLength <= 255)       { batchComponentType = 5121; batchComponentSize = 1; }
+    else if (bim && bim->batchLength <= 65535) { batchComponentType = 5123; batchComponentSize = 2; }
 
     // ------------------------------------------------------------------
     // Binary buffer layout (per primitive):
@@ -136,6 +150,7 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
     //   normals    — FLOAT VEC3, count = vertexCount
     //   texcoords  — FLOAT VEC2, count = vertexCount (even if all zeros)
     //   indices    — UNSIGNED_INT SCALAR, count = indexCount
+    //   batchids   — (BIM only) SCALAR, count = vertexCount
     // Followed by embedded image bytes (one per unique texture).
     // ------------------------------------------------------------------
 
@@ -144,6 +159,7 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
         size_t normByteOffset, normByteLength;
         size_t uvByteOffset, uvByteLength;
         size_t idxByteOffset, idxByteLength;
+        size_t bidByteOffset, bidByteLength;
         size_t vertexCount, indexCount;
         uint32_t indexMax;
         float posMin[3], posMax[3];
@@ -220,6 +236,63 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
         L.idxByteLength = L.indexCount * sizeof(uint32_t);
         writeBytes(bin, g.indices.data(), L.idxByteLength);
 
+        // BIM batch ids: one value per vertex, compact componentType
+        // (BIM doc §4.3-④). Parallel to positions so NaN-vertex skips and
+        // degenerate-face skips in GroupCellByMaterial cannot misalign them.
+        L.bidByteOffset = bin.size();
+        L.bidByteLength = 0;
+        if (writeBatchIds)
+        {
+            const std::vector<uint32_t>& bids = g.batchIds;
+            L.bidByteLength = g.vertexCount() * batchComponentSize;
+            if (bids.size() == g.vertexCount())
+            {
+                if (batchComponentSize == 1)
+                {
+                    for (size_t i = 0; i < g.vertexCount(); ++i)
+                    {
+                        uint8_t v = static_cast<uint8_t>(bids[i]);
+                        bin.push_back(v);
+                    }
+                }
+                else if (batchComponentSize == 2)
+                {
+                    for (size_t i = 0; i < g.vertexCount(); ++i)
+                    {
+                        uint16_t v = static_cast<uint16_t>(bids[i]);
+                        uint8_t lo = static_cast<uint8_t>(v & 0xFF);
+                        uint8_t hi = static_cast<uint8_t>((v >> 8) & 0xFF);
+                        bin.push_back(lo); bin.push_back(hi);
+                    }
+                }
+                else
+                {
+                    for (size_t i = 0; i < g.vertexCount(); ++i)
+                    {
+                        float v = static_cast<float>(bids[i]);  // exact to 2^24
+                        uint8_t bytes[4];
+                        std::memcpy(bytes, &v, 4);
+                        bin.insert(bin.end(), bytes, bytes + 4);
+                    }
+                }
+            }
+            else
+            {
+                // Defensive: size mismatch means pipeline bug — pad with zeros
+                // rather than emitting a malformed accessor.
+                bin.resize(bin.size() + L.bidByteLength, 0);
+            }
+
+            // glTF alignment (spec §5.1.2): accessor byteOffsets must be
+            // multiples of the component size. UBYTE/USHORT batchId sections
+            // can end on a non-4-aligned offset and would desync the NEXT
+            // primitive's POSITION/NORMAL (FLOAT) bufferViews and the image
+            // bufferViews. Pad here (legacy path never reaches this branch,
+            // keeping its bytes unchanged).
+            while (bin.size() % 4 != 0)
+                bin.push_back(0);
+        }
+
         layouts.push_back(L);
         layoutToGroup.push_back(gi);
     }
@@ -250,6 +323,11 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
             std::vector<uint8_t> jpg;
             if (EncodeJPEG(g.texturePixels.data(), g.textureWidth, g.textureHeight, jpg)) {
                 ImageInfo info;
+                // glTF 2.0 §5.1.2: every bufferView (images included) starts
+                // at a 4-byte-aligned buffer offset. Arbitrary PNG/JPEG
+                // lengths must not desync the NEXT view (real-data bug #20:
+                // multi-texture FBX tiles failed validation at byteOffset %4).
+                while (bin.size() % 4 != 0) bin.push_back(0);
                 info.byteOffset = bin.size();
                 info.byteLength = jpg.size();
                 info.mimeType = "image/jpeg";
@@ -300,6 +378,7 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
                 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
             };
             ImageInfo info;
+            while (bin.size() % 4 != 0) bin.push_back(0);   // glTF §5.1.2
             info.byteOffset = bin.size();
             info.byteLength = sizeof(kWhitePng);
             info.mimeType = "image/png";
@@ -312,6 +391,7 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
         file.seekg(0, std::ios::beg);
 
         ImageInfo info;
+        while (bin.size() % 4 != 0) bin.push_back(0);   // glTF §5.1.2
         info.byteOffset = bin.size();
         info.byteLength = fileSize;
 
@@ -332,7 +412,8 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
         images.push_back(info);
     }
 
-    size_t imageBVStart = 4 * layouts.size();
+    // Images come after per-primitive views: 4 always, +1 when batch ids active.
+    size_t imageBVStart = (writeBatchIds ? 5 : 4) * layouts.size();
 
     // ------------------------------------------------------------------
     // Build glTF JSON string
@@ -373,6 +454,9 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
              << ",\"byteLength\":" << L.uvByteLength << ",\"target\":34962}";
         json << ",{\"buffer\":0,\"byteOffset\":" << L.idxByteOffset
              << ",\"byteLength\":" << L.idxByteLength << ",\"target\":34963}";
+        if (writeBatchIds)
+            json << ",{\"buffer\":0,\"byteOffset\":" << L.bidByteOffset
+                 << ",\"byteLength\":" << L.bidByteLength << ",\"target\":34962}";
     }
     for (size_t ii = 0; ii < images.size(); ++ii) {
         json << ",{\"buffer\":0,\"byteOffset\":" << images[ii].byteOffset
@@ -385,7 +469,7 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
     for (size_t pi=0; pi<layouts.size(); ++pi) {
         auto& L = layouts[pi];
         if (pi) json << ',';
-        size_t bvBase = pi * 4;
+        size_t bvBase = pi * (writeBatchIds ? 5 : 4);
 
         json << "{\"bufferView\":" << bvBase
              << ",\"componentType\":5126,\"count\":" << L.vertexCount
@@ -400,6 +484,11 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
         json << ",{\"bufferView\":" << (bvBase+3)
              << ",\"componentType\":5125,\"count\":" << L.indexCount
              << ",\"type\":\"SCALAR\"}";
+        if (writeBatchIds)
+            json << ",{\"bufferView\":" << (bvBase+4)
+                 << ",\"componentType\":" << batchComponentType
+                 << ",\"count\":" << L.vertexCount
+                 << ",\"type\":\"SCALAR\"}";
     }
     json << ']';
 
@@ -431,12 +520,14 @@ bool GlbBuilder::Build(const std::vector<MergedMeshGroup>& groups,
     json << ",\"meshes\":[";
     for (size_t pi=0; pi<layouts.size(); ++pi) {
         if (pi) json << ',';
-        size_t accBase = pi * 4;
+        size_t accBase = pi * (writeBatchIds ? 5 : 4);
         json << "{\"primitives\":[{\"attributes\":{"
              << "\"POSITION\":" << accBase
              << ",\"NORMAL\":" << (accBase+1)
-             << ",\"TEXCOORD_0\":" << (accBase+2)
-             << "},\"indices\":" << (accBase+3)
+             << ",\"TEXCOORD_0\":" << (accBase+2);
+        if (writeBatchIds)
+            json << ",\"_BATCHID\":" << (accBase+4);
+        json << "},\"indices\":" << (accBase+3)
              << ",\"material\":" << pi
              << "}]}";
     }
@@ -539,6 +630,417 @@ bool B3dmBuilder::Build(const BinaryBlob& glb, BinaryBlob& outB3dm)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// B3dmBuilder::Build (BIM) — FeatureTable with BATCH_LENGTH + Batch Table
+//
+// Layout per b3dm spec (BIM doc §4.3-⑤):
+//   [28B header][ftJson + 0x20 pad][ftBin][btJson + 0x20 pad][btBin + 0x00 pad][glb][tail 0x00]
+// HARD RULE: every section must END on an 8-byte boundary *relative to the
+// tile start* (spec: "The JSON header shall end on an 8-byte boundary within
+// the containing tile binary" / "The binary glTF shall start on an 8-byte
+// boundary"). With a 28-byte header this does NOT mean "chunk length is a
+// multiple of 8": 28 % 8 = 4, so padding each chunk to %8==0 would leave the
+// glb at offset ≡ 4 (mod 8). We track the running absolute offset instead.
+// Header length fields include chunk padding (consumers locate the glb by
+// summing them).
+// ---------------------------------------------------------------------------
+bool B3dmBuilder::Build(const BinaryBlob& glb,
+                        uint32_t batchLength,
+                        const std::string& batchTableJson,
+                        const std::vector<uint8_t>& batchTableBinary,
+                        BinaryBlob& outB3dm)
+{
+    outB3dm.data.clear();
+
+    constexpr size_t HEADER_SIZE = 28;
+    size_t off = HEADER_SIZE;   // running absolute offset from tile start
+
+    // FeatureTable JSON: {"BATCH_LENGTH":N} padded so it ends 8-aligned.
+    std::string ftJson = "{\"BATCH_LENGTH\":" + std::to_string(batchLength) + "}";
+    while ((off + ftJson.size()) % 8 != 0)
+        ftJson.push_back(' ');
+    off += ftJson.size();
+    const uint32_t ftJsonLen = static_cast<uint32_t>(ftJson.size());
+    const uint32_t ftBinLen = 0;
+
+    // Batch table JSON: same absolute rule. Spec: btBin must be 0 when
+    // btJson is 0 — an empty JSON therefore drops the binary body too.
+    std::string btJson;
+    uint32_t btJsonLen = 0;
+    if (!batchTableJson.empty())
+    {
+        btJson = batchTableJson;
+        while ((off + btJson.size()) % 8 != 0)
+            btJson.push_back(' ');
+        off += btJson.size();
+        btJsonLen = static_cast<uint32_t>(btJson.size());
+    }
+
+    // Batch table binary: off is 8-aligned here; zero-pad length to 8.
+    std::vector<uint8_t> btBin;
+    uint32_t btBinLen = 0;
+    if (btJsonLen > 0 && !batchTableBinary.empty())
+    {
+        btBin = batchTableBinary;
+        while (btBin.size() % 8 != 0)
+            btBin.push_back(0);
+        off += btBin.size();
+        btBinLen = static_cast<uint32_t>(btBin.size());   // includes padding
+    }
+
+    // glb now starts at `off` with off % 8 == 0. Total length 8-aligned by
+    // trailing zeros (the glb's own header carries its true length).
+    size_t totalLen = off + glb.size();
+    while (totalLen % 8 != 0) ++totalLen;
+
+    outB3dm.data.reserve(totalLen);
+
+    writeLE(outB3dm.data, B3DM_MAGIC);
+    writeLE(outB3dm.data, B3DM_VERSION);
+    writeLE<uint32_t>(outB3dm.data, static_cast<uint32_t>(totalLen));
+    writeLE<uint32_t>(outB3dm.data, ftJsonLen);
+    writeLE<uint32_t>(outB3dm.data, ftBinLen);
+    writeLE<uint32_t>(outB3dm.data, btJsonLen);
+    writeLE<uint32_t>(outB3dm.data, btBinLen);
+
+    writeBytes(outB3dm.data, ftJson.data(), ftJson.size());
+
+    if (btJsonLen > 0)
+        writeBytes(outB3dm.data, btJson.data(), btJson.size());
+
+    if (btBinLen > 0)
+        writeBytes(outB3dm.data, btBin.data(), btBin.size());
+
+    writeBytes(outB3dm.data, glb.ptr(), glb.size());
+    while (outB3dm.data.size() % 8 != 0)
+        outB3dm.data.push_back(0);
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// BatchTableWriter — PropertySchema rows -> Batch Table (JSON header + binary)
+//
+// Column three-state rule (BIM doc §4.8(3)), binary mapping per the doc's
+// type table (legacy Batch Table binary has NO INT64 component type):
+//   - column present with a non-null value in EVERY row, numeric-only,
+//     bool-free and NaN/Inf-free -> binary reference:
+//       Int32 / Int64 (fits int32) -> INT   (5124, 4B)
+//       Double                     -> DOUBLE(5128, 8B)  [no float32 downcast]
+//       Vec3                       -> VEC3 / FLOAT (5126, 12B)
+//   - column with any null / string / bool / non-finite value, or Int64
+//     beyond int32 range -> JSON array (nulls allowed per spec; non-finite
+//     values are nulled and counted — BIM doc §4.3-⑧);
+//   - column with null in every row -> omitted entirely.
+// byteOffset is measured from the start of the binary body and aligned to
+// the component size (8B for DOUBLE, 4B otherwise).
+// ---------------------------------------------------------------------------
+namespace
+{
+    // Minimal JSON string escaping (keys AND values may carry quotes or
+    // control characters from user metadata).
+    void EmitJsonString(std::ostringstream& os, const std::string& s)
+    {
+        os << "\"";
+        for (char ch : s)
+        {
+            switch (ch)
+            {
+            case '"':  os << "\\\""; break;
+            case '\\': os << "\\\\"; break;
+            case '\n': os << "\\n"; break;
+            case '\r': os << "\\r"; break;
+            case '\t': os << "\\t"; break;
+            case '\b': os << "\\b"; break;
+            case '\f': os << "\\f"; break;
+            default:
+                if (static_cast<unsigned char>(ch) < 0x20)
+                {
+                    char esc[8];
+                    std::snprintf(esc, sizeof(esc), "\\u%04x", static_cast<unsigned char>(ch));
+                    os << esc;
+                }
+                else
+                    os << ch;
+            }
+        }
+        os << "\"";
+    }
+
+    // Shortest round-trip decimal for JSON numbers (review #3): grow the
+    // precision until strtod recovers the exact double (17 sig digits worst
+    // case). Fixed precision(10) corrupted ids; precision(17) printed noise.
+    std::string DoubleToJson(double d)
+    {
+        char buf[40];
+        for (int p = 1; p <= 17; ++p)
+        {
+            std::snprintf(buf, sizeof(buf), "%.*g", p, d);
+            if (std::strtod(buf, nullptr) == d) return buf;
+        }
+        std::snprintf(buf, sizeof(buf), "%.17g", d);
+        return buf;
+    }
+
+    bool IsFiniteValue(const BimValue& v)
+    {
+        switch (v.type)
+        {
+        case BimValue::Type::Double: return std::isfinite(v.d);
+        case BimValue::Type::Vec3:
+            return std::isfinite(v.v3[0]) && std::isfinite(v.v3[1]) && std::isfinite(v.v3[2]);
+        default: return true;
+        }
+    }
+
+    void AppendLE(std::vector<uint8_t>& bin, const void* p, size_t n)
+    {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        bin.insert(bin.end(), b, b + n);
+    }
+}
+
+bool BatchTableWriter::Build(const std::vector<std::shared_ptr<const BimPropertyRow>>& rows,
+                              std::string& outJson,
+                              std::vector<uint8_t>& outBinary,
+                              size_t* outNullified)
+{
+    outJson.clear();
+    outBinary.clear();
+    if (outNullified) *outNullified = 0;
+    size_t nullified = 0;
+
+    // Empty table (or all-empty rows) -> minimal valid Batch Table JSON.
+    if (rows.empty()) { outJson = "{}"; return true; }
+
+    // Row lookup: FIRST occurrence of the key wins — reserved columns are
+    // injected at the head of the row, so a stray user duplicate can never
+    // shadow them (BIM doc §4.8(1) "保留列胜出").
+    auto colValue = [](const std::shared_ptr<const BimPropertyRow>& row,
+                       const std::string& name) -> const BimValue*
+    {
+        if (!row) return nullptr;
+        for (const auto& kv : *row)
+            if (kv.first == name) return &kv.second;
+        return nullptr;
+    };
+    // Empty string counts as missing (sidecar convention).
+    auto presentValue = [&](const std::shared_ptr<const BimPropertyRow>& row,
+                            const std::string& name) -> const BimValue*
+    {
+        const BimValue* v = colValue(row, name);
+        if (v && v->type == BimValue::Type::String && v->s.empty()) return nullptr;
+        return v;
+    };
+
+    // Pass 1: collect columns in first-appearance order (byte-stable).
+    std::vector<std::string> colNames;
+    for (const auto& row : rows)
+    {
+        if (!row) continue;
+        for (const auto& kv : *row)
+        {
+            if (std::find(colNames.begin(), colNames.end(), kv.first) == colNames.end())
+                colNames.push_back(kv.first);
+        }
+    }
+    if (colNames.empty()) { outJson = "{}"; return true; }
+
+    // Pass 2: per-column analysis.
+    struct ColInfo
+    {
+        size_t present = 0;
+        BimValue::Type widest = BimValue::Type::Bool;
+        bool boolSeen = false;         // legacy binary has no BOOL -> JSON
+        bool nonFinite = false;        // NaN/±Inf present -> demote column to JSON (§4.3-⑧)
+        bool int64Beyond32 = false;    // legacy binary has no INT64 -> JSON keeps digits
+    };
+    std::vector<ColInfo> cols(colNames.size());
+
+    auto rank = [](BimValue::Type t) -> int
+    {
+        switch (t)
+        {
+        case BimValue::Type::Bool:   return 0;
+        case BimValue::Type::Int32:  return 1;
+        case BimValue::Type::Int64:  return 2;
+        case BimValue::Type::Double: return 3;
+        case BimValue::Type::Vec3:   return 4;
+        case BimValue::Type::String: return 5;
+        }
+        return 6;
+    };
+    auto unify = [&rank](BimValue::Type a, BimValue::Type b) -> BimValue::Type
+    {
+        return rank(a) >= rank(b) ? a : b;
+    };
+
+    for (size_t r = 0; r < rows.size(); ++r)
+    {
+        for (size_t c = 0; c < colNames.size(); ++c)
+        {
+            const BimValue* v = presentValue(rows[r], colNames[c]);
+            if (!v) continue;
+            ++cols[c].present;
+            cols[c].widest = unify(cols[c].widest, v->type);
+            if (v->type == BimValue::Type::Bool) cols[c].boolSeen = true;
+            if (v->type == BimValue::Type::Int64 &&
+                (v->i64 > INT32_MAX || v->i64 < INT32_MIN))
+                cols[c].int64Beyond32 = true;
+            if (!IsFiniteValue(*v)) cols[c].nonFinite = true;
+        }
+    }
+
+    std::ostringstream json;
+    json << "{";   // doubles formatted per-value (DoubleToJson)
+
+    std::vector<uint8_t>& bin = outBinary;
+    bool firstCol = true;
+
+    for (size_t c = 0; c < colNames.size(); ++c)
+    {
+        const std::string& name = colNames[c];
+        const ColInfo& ci = cols[c];
+
+        if (ci.present == 0) continue;   // all-null column -> omitted
+
+        // Binary eligibility (componentType mapping per §4.8(3)).
+        uint32_t compType = 0; size_t alignTo = 0; const char* typeName = "";
+        bool binaryEligible = (ci.present == rows.size()) &&
+                              !ci.boolSeen && !ci.nonFinite;
+        if (binaryEligible)
+        {
+            switch (ci.widest)
+            {
+            case BimValue::Type::Int32:
+                compType = 5124; alignTo = 4; typeName = "SCALAR"; break;   // INT
+            case BimValue::Type::Int64:
+                if (!ci.int64Beyond32) { compType = 5124; alignTo = 4; typeName = "SCALAR"; }
+                else binaryEligible = false;                                // -> JSON (exact digits)
+                break;
+            case BimValue::Type::Double:
+                compType = 5128; alignTo = 8; typeName = "SCALAR"; break;   // DOUBLE
+            case BimValue::Type::Vec3:
+                compType = 5126; alignTo = 4; typeName = "VEC3"; break;     // VEC3/FLOAT
+            default:
+                binaryEligible = false; break;
+            }
+        }
+
+        if (!firstCol) json << ",";
+        firstCol = false;
+
+        EmitJsonString(json, name);
+        json << ":";
+
+        if (binaryEligible)
+        {
+            while (bin.size() % alignTo != 0) bin.push_back(0);
+            const size_t byteOffset = bin.size();
+            for (size_t r = 0; r < rows.size(); ++r)
+            {
+                const BimValue* v = colValue(rows[r], name);   // present for every row
+                switch (ci.widest)
+                {
+                case BimValue::Type::Int32:
+                case BimValue::Type::Int64:
+                {
+                    int32_t x = 0;
+                    if (v) x = (v->type == BimValue::Type::Int32) ? v->i32
+                                       : (v->type == BimValue::Type::Int64) ? static_cast<int32_t>(v->i64)
+                                       : (v->type == BimValue::Type::Bool) ? (v->b ? 1 : 0)
+                                       : (v->type == BimValue::Type::Double) ? static_cast<int32_t>(v->d) : 0;
+                    AppendLE(bin, &x, 4);
+                    break;
+                }
+                case BimValue::Type::Double:
+                {
+                    double x = 0.0;
+                    if (v)
+                    {
+                        if (v->type == BimValue::Type::Double) x = v->d;
+                        else if (v->type == BimValue::Type::Int32) x = static_cast<double>(v->i32);
+                        else if (v->type == BimValue::Type::Int64) x = static_cast<double>(v->i64);
+                        else if (v->type == BimValue::Type::Bool) x = v->b ? 1.0 : 0.0;
+                    }
+                    AppendLE(bin, &x, 8);
+                    break;
+                }
+                case BimValue::Type::Vec3:
+                default:
+                {
+                    float f[3] = { 0.f, 0.f, 0.f };
+                    if (v && v->type == BimValue::Type::Vec3)
+                    {
+                        f[0] = static_cast<float>(v->v3[0]);
+                        f[1] = static_cast<float>(v->v3[1]);
+                        f[2] = static_cast<float>(v->v3[2]);
+                    }
+                    else if (v)   // numeric in a Vec3-widest column: x channel
+                    {
+                        double x = 0.0;
+                        if (v->type == BimValue::Type::Double) x = v->d;
+                        else if (v->type == BimValue::Type::Int32) x = v->i32;
+                        else if (v->type == BimValue::Type::Int64) x = static_cast<double>(v->i64);
+                        f[0] = static_cast<float>(x);
+                    }
+                    AppendLE(bin, f, 12);
+                    break;
+                }
+                }
+            }
+            json << "{\"byteOffset\":" << byteOffset
+                 << ",\"componentType\":" << compType
+                 << ",\"type\":\"" << typeName << "\"}";
+        }
+        else
+        {
+            // JSON array form; missing values -> null; non-finite -> null + count.
+            json << "[";
+            for (size_t r = 0; r < rows.size(); ++r)
+            {
+                if (r) json << ",";
+                const BimValue* v = presentValue(rows[r], name);
+                if (!v)
+                {
+                    json << "null";
+                    continue;
+                }
+                switch (v->type)
+                {
+                case BimValue::Type::Bool:
+                    json << (v->b ? "true" : "false"); break;
+                case BimValue::Type::Int32:
+                    json << v->i32; break;
+                case BimValue::Type::Int64:
+                    json << v->i64; break;
+                case BimValue::Type::Double:
+                    if (std::isfinite(v->d)) json << DoubleToJson(v->d);
+                    else { json << "null"; ++nullified; }
+                    break;
+                case BimValue::Type::Vec3:
+                    if (IsFiniteValue(*v))
+                        json << "[" << DoubleToJson(v->v3[0]) << ","
+                             << DoubleToJson(v->v3[1]) << ","
+                             << DoubleToJson(v->v3[2]) << "]";
+                    else { json << "null"; ++nullified; }
+                    break;
+                case BimValue::Type::String:
+                    EmitJsonString(json, v->s);
+                    break;
+                }
+            }
+            json << "]";
+        }
+    }
+    json << "}";
+
+    outJson = json.str();
+    if (outNullified) *outNullified = nullified;
+    return true;
+}
+
+
 void B3dmBuilder::PadTo8(std::vector<uint8_t>& buf)
 {
     while (buf.size() % 8 != 0)
@@ -599,6 +1101,7 @@ void MaterialGrouper::MergeGroupsByMaterial(std::vector<MergedMeshGroup>& groups
             combined.normals.reserve(totalVerts * 3);
             combined.texcoords.reserve(totalVerts * 2);
             combined.indices.reserve(totalIndices);
+            combined.batchIds.reserve(totalVerts);
 
             for (int a = 0; a < 3; ++a)
             {
@@ -615,6 +1118,10 @@ void MaterialGrouper::MergeGroupsByMaterial(std::vector<MergedMeshGroup>& groups
                     g.positions.begin(), g.positions.end());
                 combined.normals.insert(combined.normals.end(),
                     g.normals.begin(), g.normals.end());
+                // BIM: batch ids are per-vertex values; pure concatenation
+                // preserves them (no rebasing needed — tile-scoped ids).
+                combined.batchIds.insert(combined.batchIds.end(),
+                    g.batchIds.begin(), g.batchIds.end());
                 if (!g.texcoords.empty())
                     combined.texcoords.insert(combined.texcoords.end(),
                         g.texcoords.begin(), g.texcoords.end());
@@ -650,6 +1157,7 @@ void MaterialGrouper::GroupCellByMaterial(GridCell& cell, const aiScene* scene,
         std::vector<float> normals;
         std::vector<float> texcoords;
         std::vector<uint32_t> indices;
+        std::vector<uint32_t> batchIds;   // BIM: one per vertex, parallel to positions
         double bboxMin[3] = { DBL_MAX, DBL_MAX, DBL_MAX };
         double bboxMax[3] = { -DBL_MAX, -DBL_MAX, -DBL_MAX };
         double localBboxMin[3] = { DBL_MAX, DBL_MAX, DBL_MAX };
@@ -659,6 +1167,13 @@ void MaterialGrouper::GroupCellByMaterial(GridCell& cell, const aiScene* scene,
         size_t degenerateSkipped = 0;
     };
     std::map<int, Accumulator> accMap;
+
+    // BIM binding enabled = any instance carries a property row (D5: master
+    // switch is data presence; no separate option needed at this layer).
+    const bool bimEnabled = cell.featureBatch.rows.size() > 0 ||
+                            std::any_of(cell.instances.begin(), cell.instances.end(),
+                                        [](const MeshInstance& i) { return i.properties != nullptr; });
+    (void)bimEnabled;
 
     for (auto& inst : cell.instances)
     {
@@ -693,6 +1208,14 @@ void MaterialGrouper::GroupCellByMaterial(GridCell& cell, const aiScene* scene,
                 continue;
             }
         }
+
+        // BIM: assign/lookup this instance's feature row in the cell-local
+        // batch (row index == batchId). Unmatched instances share one empty
+        // row. Assigned AFTER the NaN pre-check so skipped instances cannot
+        // leave orphan rows that inflate batchLength (review #11).
+        uint32_t batchId = 0;
+        if (bimEnabled)
+            batchId = cell.featureBatch.AssignBatchId(inst.properties);
 
         // Normal matrix: M_normal = (M_world^{-1})^T, computed once per instance.
         aiMatrix4x4 normalMat;
@@ -775,6 +1298,11 @@ void MaterialGrouper::GroupCellByMaterial(GridCell& cell, const aiScene* scene,
                 acc.texcoords.push_back(0.0f);
                 acc.texcoords.push_back(0.0f);
             }
+
+            // BIM: batch id per vertex — value semantics, travels with the
+            // vertex through material merging (D1).
+            if (bimEnabled)
+                acc.batchIds.push_back(batchId);
         }
 
         for (unsigned int fi = 0; fi < mesh->mNumFaces; ++fi)
@@ -850,6 +1378,7 @@ void MaterialGrouper::GroupCellByMaterial(GridCell& cell, const aiScene* scene,
 
         g.positions = std::move(a.positions);
         g.indices   = std::move(a.indices);
+        g.batchIds  = std::move(a.batchIds);
 
         if (a.hasNormal)
             g.normals = std::move(a.normals);
@@ -1154,12 +1683,50 @@ bool TilesetWriter::WriteTiles(GridCell& cell, const aiScene* scene,
 
     if (cell.materialGroups.empty()) return true;
 
+    // ---- BIM binding: per-tile feature batch → _BATCHID + Batch Table ----
+    // Enabled iff the cell produced at least one feature row (master switch
+    // is data presence — see BIM doc §4.6: binding off ⇒ legacy path,
+    // byte-identical output; binding on but zero matched rows ⇒ same).
+    // §4.6 also requires the degenerate "single empty row" case (every
+    // instance unmatched) to fall back to the legacy path with a warning.
+    uint32_t batchLength = static_cast<uint32_t>(cell.featureBatch.rows.size());
+    if (batchLength == 1 && cell.featureBatch.rows[0] &&
+        cell.featureBatch.rows[0]->empty())
+    {
+        MGO_LOG(Warning) << "[TileBuilder] tile at cell " << cell.cellKey
+                         << ": BIM binding produced only the shared empty row"
+                         << " — falling back to legacy (no batch table)";
+        batchLength = 0;
+    }
+
+    GlbBuilder::BatchIdContext bimCtx;
+    bimCtx.batchLength = batchLength;
+
     BinaryBlob glb;
     if (!GlbBuilder::Build(cell.materialGroups, glb, opts.fbxDirectory,
-                           opts.doubleSided)) return false;
+                           opts.doubleSided,
+                           batchLength > 0 ? &bimCtx : nullptr)) return false;
 
     BinaryBlob b3dm;
-    if (!B3dmBuilder::Build(glb, b3dm)) return false;
+    if (batchLength > 0)
+    {
+        std::string btJson;
+        std::vector<uint8_t> btBin;
+        size_t nullified = 0;
+        if (!BatchTableWriter::Build(cell.featureBatch.rows, btJson, btBin, &nullified))
+            return false;
+        if (nullified > 0)
+            MGO_LOG(Warning) << "[TileBuilder] tile at cell " << cell.cellKey << ": "
+                             << nullified << " non-finite (NaN/±Inf) property value(s) "
+                             << "nulled in the batch table (BIM doc §4.3-⑧)";
+        if (btJson.empty()) btJson = "{}";
+        if (!B3dmBuilder::Build(glb, batchLength, btJson, btBin, b3dm))
+            return false;
+    }
+    else
+    {
+        if (!B3dmBuilder::Build(glb, b3dm)) return false;
+    }
 
     // Build file path FIRST, write file, then set tileFileName only on success.
     // Setting tileFileName before the write would leave a dangling content.uri

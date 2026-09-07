@@ -13,6 +13,7 @@ add_library(MeshProjectionErrorCorrector SHARED
     CRSTransformer.cpp
     MeshProjectionErrorCorrector.cpp
     PROJUtils.cpp
+    TileDataTypes.cpp
 )
 mgo_set_library_version(MeshProjectionErrorCorrector)
 target_include_directories(MeshProjectionErrorCorrector PUBLIC

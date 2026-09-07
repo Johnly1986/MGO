@@ -31,6 +31,14 @@ make clean          # Remove build directory
 | **OSGBConverter** | Shared lib | OSGB oblique photography (DJI Terra / ContextCapture) → 3D Tiles; optional, requires OpenSceneGraph |
 
 > **Note**: MeshProjection was renamed to **MeshProjectionErrorCorrector**. CProjectionEngine, TileDataTypes, Octree, AxisMapper, and GeodeticMath all live in `MeshProjectionErrorCorrector/`. RouteAnalysisAdpter and RouteAnalysisAdpterMain were deprecated and removed.
+>
+> **Note**: The Node.js visualization service (`mgo-server`, REST/SSE job API + CesiumJS viewer) was
+> extracted to its own repository: **[MGOServer](https://github.com/Johnly1986/MGOServer)**, checked out
+> as a sibling of this repo (`../MGOServer`). It consumes this project only through the built
+> `MGOConsole` binary. The cross-repo contract is the CLI's English stdout progress protocol
+> `[Module] Progress: X/Y` / `[Module] Done:` — changing those lines means updating
+> `MGOServer/src/jobs/progress.js` and its golden fixtures (`MGOServer/test/fixtures/terrain-real.log`)
+> in the same change.
 
 ## Key Dependencies
 

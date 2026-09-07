@@ -137,7 +137,7 @@ bool TerrainConverter::Convert(const TerrainConverterOptions& opts)
 
     // — 4. Process each tile (parallel) —
     int totalTiles = quadtree.TileCount();
-    std::cout << "[TerrainConverter] 处理进度: 0/" << totalTiles << std::endl;
+    std::cout << "[TerrainConverter] Progress: 0/" << totalTiles << std::endl;
 
     // Collect tile pointers (ForEachLeaf provides const refs; ProcessTile takes const ref)
     std::vector<const TerrainTile*> tilePtrs;
@@ -156,7 +156,7 @@ bool TerrainConverter::Convert(const TerrainConverterOptions& opts)
         if (done % 10 == 0)
         {
             std::lock_guard<std::mutex> lk(progressMutex);
-            std::cout << "[TerrainConverter] 处理进度: " << done << "/"
+            std::cout << "[TerrainConverter] Progress: " << done << "/"
                       << totalTiles << std::endl;
         }
     };
@@ -193,10 +193,10 @@ bool TerrainConverter::Convert(const TerrainConverterOptions& opts)
 
     int done = processed.load() + failed.load();
     if (failed.load() == 0)
-        std::cout << "[TerrainConverter] 处理完成: " << done << "/"
+        std::cout << "[TerrainConverter] Done: " << done << "/"
                   << totalTiles << std::endl;
     else
-        std::cerr << "[TerrainConverter] 处理完成: " << done << "/" << totalTiles
+        std::cerr << "[TerrainConverter] Done: " << done << "/" << totalTiles
                   << " (" << failed.load() << " tiles failed)" << std::endl;
 
     // — 5. Generate layer.json —

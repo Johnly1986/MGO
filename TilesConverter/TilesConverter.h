@@ -97,6 +97,28 @@ struct TilesConverterOptions
     //     eliminating all curvature residual. More expensive (O(N) GK inverse
     //     calls). Modifies aiScene vertices in-place.
     bool perVertexProjectionCorrection = false;
+
+    // ---- BIM property binding (BIM_BINDING_ARCHITECTURE.md §4.5) ----
+    // Master switch: false ⇒ byte-identical output to pre-binding builds.
+    bool bimBind = false;
+    // Format hint for strategy auto-detection: input file name or extension
+    // (".ifc"/"fbx"/...). Empty + no bimStrategy => Generic strategy.
+    std::string bimFormatHint;
+    // Collect scene-internal metadata (FBX UDP / IFC Psets / glTF extras).
+    bool bimCollectSceneMetadata = true;
+    // Ancestor-chain inheritance for scene metadata (building -> storey -> element).
+    bool bimInheritParents = true;
+    // Sidecar CSV: first column = join key (name/GUID), rest = property columns.
+    std::string bimPropsFile;
+    // Comma-separated id keys override. Empty = per-strategy default
+    // candidate list (GlobalId, ElementId, ifcGUID, UniqueId).
+    std::string bimIdPropertyKeys;
+    // Force format strategy ("ifc"/"fbx"/"gltf2"/"obj"/"3ds"/"generic"); empty = auto-detect.
+    std::string bimStrategy;
+    // JSON report path (transparency manifest; empty = no report).
+    std::string bimReportFile;
+    // NOTE: "--bim-formats" is a pure CLI mode handled by MGOConsole before
+    // the converter runs; it never belonged in this struct (review #19).
 };
 
 // ---------------------------------------------------------------------------

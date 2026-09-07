@@ -716,7 +716,7 @@ int OSGBReader::ReadAllTiles(const std::vector<std::string>& tilePaths,
     if (skippedCount > 0)
         std::cerr << "[OSGBReader] 警告: 跳过 " << skippedCount
                   << " 个超过 maxLOD(" << maxLOD << ") 的瓦片" << std::endl;
-    std::cout << "[OSGBReader] 处理进度: " << successCount << "/"
+    std::cout << "[OSGBReader] Progress: " << successCount << "/"
               << tilePaths.size() << std::endl;
     return successCount;
 }

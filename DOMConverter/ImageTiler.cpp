@@ -504,12 +504,12 @@ bool ImageTiler::Convert(const ImageTilerOptions& opts)
         totalTiles += count;
         ++levelIdx;
 
-        std::cout << "[ImageTiler] 处理进度: " << levelIdx << "/"
+        std::cout << "[ImageTiler] Progress: " << levelIdx << "/"
                   << levelsTotal << std::endl;
     }
 
-    std::cout << "[ImageTiler] 处理完成: " << totalTiles << " 瓦片 ("
-              << levelsTotal << " 层级)" << std::endl;
+    std::cout << "[ImageTiler] Done: " << totalTiles << " tiles ("
+              << levelsTotal << " levels)" << std::endl;
 
     // ---- 7. Write metadata ----
     WriteLayerJson(opts.outputDir, m_geoWest, m_geoSouth, m_geoEast, m_geoNorth,

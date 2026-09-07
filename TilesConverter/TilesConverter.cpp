@@ -8,6 +8,7 @@
 //
 
 #include "TilesConverter.h"
+#include "BimBindingPipeline.h"
 #include "../MeshGroupOptimizer/MeshGroupOptimizer.h"
 #include "../MeshProjectionErrorCorrector/GeoreferencingFactory.h"
 
@@ -15,11 +16,14 @@
 #include <assimp/mesh.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cfloat>
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <unordered_map>
 #include <Eigen/Dense>
 
@@ -28,6 +32,16 @@
 // ===========================================================================
 namespace
 {
+    // Strip "$AssimpFbx$" and everything after it (FBX pivot-chain suffix):
+    //   "Wall$AssimpFbx$_PreRotation" -> "Wall"
+    // (BIM doc §3.2 L2: assimp inserts these tags when flattening FBX nodes;
+    //  the tail is pivot machinery, not part of the user-facing name.)
+    std::string StripAssimpFbxTag(const std::string& name)
+    {
+        size_t pos = name.find("$AssimpFbx$");
+        return (pos == std::string::npos) ? name : name.substr(0, pos);
+    }
+
     TileBuildOptions ToBuildOpts(const TilesConverterOptions& o)
     {
         TileBuildOptions b;
@@ -80,6 +94,11 @@ bool TilesConverter::CollectMeshInstances(const aiScene* scene)
 
     m_instances.clear();
 
+    // Node/mesh names are user bytes on legacy pipelines (GBK FBX in the
+    // wild, review #17): repair encoding ONCE at ingestion so join keys,
+    // reserved columns and the batch table all carry valid UTF-8.
+    size_t namesFixed = 0;
+
     std::function<void(aiNode*, const aiMatrix4x4&)> traverse =
         [&](aiNode* node, const aiMatrix4x4& parentXform)
     {
@@ -90,11 +109,27 @@ bool TilesConverter::CollectMeshInstances(const aiScene* scene)
             unsigned int mi = node->mMeshes[i];
             if (mi >= scene->mNumMeshes) continue;
 
+            const aiMesh* mesh = scene->mMeshes[mi];
+
             MeshInstance inst;
             inst.meshIndex = mi;
             fromMatrix4x4(world, inst.worldTransform);
 
-            const aiMesh* mesh = scene->mMeshes[mi];
+            // ---- BIM identity capture (L1: aiNode is the binding carrier) ----
+            // Filled unconditionally (cheap); consumed only when bimBind.
+            // objectName strips the $AssimpFbx$ pivot suffix so FBX join keys
+            // match user-facing names (and sidecar CSVs).
+            inst.identityNode = node;
+            bool rep = false;
+            inst.objectName = FixTextEncoding(
+                StripAssimpFbxTag(std::string(node->mName.C_Str())), &rep);
+            if (rep) ++namesFixed;
+            rep = false;
+            inst.meshName = mesh
+                ? FixTextEncoding(std::string(mesh->mName.C_Str()), &rep)
+                : std::string();
+            if (rep) ++namesFixed;
+
             double sumX = 0.0, sumY = 0.0, sumZ = 0.0;
             for (unsigned int vi = 0; vi < mesh->mNumVertices; ++vi)
             {
@@ -128,6 +163,12 @@ bool TilesConverter::CollectMeshInstances(const aiScene* scene)
     };
 
     traverse(scene->mRootNode, aiMatrix4x4());
+
+    if (namesFixed > 0)
+        std::cerr << "[TilesConverter] Warning: repaired " << namesFixed
+                  << " non-UTF-8 node/mesh name(s) at ingestion (BIM doc §8 R1)"
+                  << std::endl;
+
     return !m_instances.empty();
 }
 
@@ -494,6 +535,219 @@ bool TilesConverter::Convert(const aiScene* scene,
         std::cerr << "[TilesConverter] No mesh instances found" << std::endl;
         return false;
     }
+
+    // 1a. BIM property binding (BIM_BINDING_ARCHITECTURE.md §4.3-①②):
+    //     strategy = per-format identity/metadata logic (auto-detected from
+    //     the assimp importer id, or forced via --bim-strategy); pipeline
+    //     composes scene metadata + optional sidecar into per-instance rows.
+    //     Disabled (default) => instances carry no rows, and TileBuilder
+    //     falls back to the legacy path (byte-identical output).
+    if (m_opts.bimBind)
+    {
+        // Format detection precedence: --bim-strategy override > file-name hint.
+        const std::string formatId = !m_opts.bimStrategy.empty()
+            ? m_opts.bimStrategy
+            : m_opts.bimFormatHint;
+        const IBindingStrategy& strategy =
+            BindingStrategyRegistry::For(formatId);
+
+        auto cap = strategy.Describe();
+
+        // Unknown format silently downgraded to the generic strategy would
+        // produce wrong id semantics — say so (review #19).
+        {
+            std::string lower = formatId;
+            for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (std::string(cap.format) == "Generic" && lower.find("generic") == std::string::npos)
+                std::cerr << "[TilesConverter] Warning: BIM format \"" << formatId
+                          << "\" unrecognized — using the Generic strategy "
+                          << "(metadata keys + objectName only)" << std::endl;
+        }
+
+        std::unique_ptr<SidecarTableSource> sidecar;
+        if (!m_opts.bimPropsFile.empty())
+        {
+            sidecar = std::make_unique<SidecarTableSource>();
+            std::string err;
+            if (!sidecar->Load(m_opts.bimPropsFile, err))
+            {
+                // §4.8(5): an explicitly requested property table that cannot
+                // be read must abort the conversion — a warning would let
+                // whole projects ship tiles with silently missing properties
+                // (review #9).
+                std::cerr << "[TilesConverter] Error: " << err << std::endl;
+                return false;
+            }
+        }
+
+        BimBindingPipeline::Options pipeOpts;
+        pipeOpts.collectSceneMetadata = m_opts.bimCollectSceneMetadata;
+        pipeOpts.inheritAncestors = m_opts.bimInheritParents;
+        pipeOpts.idPropertyKeys = m_opts.bimIdPropertyKeys;
+
+        BimBindingPipeline pipeline(strategy, sidecar.get(), pipeOpts);
+        BimBindingPipeline::Summary summary;
+        summary.strategyName = cap.format;
+        summary.formatId = formatId;
+        auto results = pipeline.BindAll(m_instances, summary);
+
+        // One stdout line (MGOServer prefix-matches "Progress:", so this is
+        // additive only — BIM doc §4.3-②′ transparency rule).
+        std::cout << "[TilesConverter] BIM binding: strategy=" << cap.format
+                  << " instances=" << summary.total
+                  << " withRow=" << summary.withRow
+                  << " withObjectId=" << summary.withObjectId
+                  << std::endl;
+
+        if (summary.withRow == 0)
+            std::cerr << "[TilesConverter] Warning: BIM binding matched no instance "
+                      << "— tiles will be written on the LEGACY path (no batch table). "
+                      << "Check the sidecar join key / --bim-strategy." << std::endl;
+
+        if (summary.reservedCollisions > 0)
+        {
+            // §4.8(1): reserved columns win over user keys; the collisions
+            // must be surfaced, not silently shadowed (review #8).
+            std::cerr << "[TilesConverter] Warning: " << summary.reservedCollisions
+                      << " user propert(ies) collided with reserved columns "
+                      << "(objectId/objectName/objectClass) and were dropped:"
+                      << std::endl;
+            for (size_t i = 0; i < summary.droppedKeys.size(); ++i)
+                std::cerr << "[TilesConverter]   dropped " << summary.droppedKeys[i] << std::endl;
+        }
+
+        if (sidecar)
+        {
+            const auto& ss = sidecar->Stats();
+            std::cerr << "[TilesConverter] BIM sidecar: rows=" << ss.rowCount
+                      << " matched=" << ss.matched
+                      << " unmatched=" << ss.unmatched
+                      << " duplicateKeys=" << ss.duplicateKeys << std::endl;
+            if (ss.utf8Replaced > 0)
+                std::cerr << "[TilesConverter] Warning: " << ss.utf8Replaced
+                          << " sidecar field(s) were not valid UTF-8 and were "
+                          << "repaired (§8 R1)" << std::endl;
+            for (size_t i = 0; i < ss.unmatchedNames.size() && i < 5; ++i)
+                std::cerr << "[TilesConverter] BIM unmatched: \""
+                          << ss.unmatchedNames[i] << "\"" << std::endl;
+        }
+
+        // JSON transparency report (--bim-report)
+        if (!m_opts.bimReportFile.empty())
+        {
+            // Every user-controlled string (paths, keys, values) must be
+            // escaped — report.json itself has to stay parseable (review #18).
+            auto JsonEscape = [](const std::string& in) -> std::string
+            {
+                std::string out;
+                out.reserve(in.size() + 8);
+                for (char ch : in)
+                {
+                    switch (ch)
+                    {
+                    case '"':  out += "\\\""; break;
+                    case '\\': out += "\\\\"; break;
+                    case '\n': out += "\\n"; break;
+                    case '\r': out += "\\r"; break;
+                    case '\t': out += "\\t"; break;
+                    default:
+                        if (static_cast<unsigned char>(ch) < 0x20)
+                        {
+                            char esc[8];
+                            std::snprintf(esc, sizeof(esc), "\\u%04x", static_cast<unsigned char>(ch));
+                            out += esc;
+                        }
+                        else out += ch;
+                    }
+                }
+                return out;
+            };
+
+            std::ostringstream rj;
+            rj << "{\n  \"strategy\": \"" << JsonEscape(cap.format) << "\",\n"
+               << "  \"formatId\": \"" << JsonEscape(formatId) << "\",\n"
+               << "  \"nativeGuid\": " << (cap.nativeGuid ? "true" : "false") << ",\n"
+               << "  \"idSource\": \"" << JsonEscape(cap.idSource) << "\",\n"
+               << "  \"sceneMetadata\": " << (cap.sceneMetadata ? "true" : "false") << ",\n"
+               << "  \"sidecar\": "
+               << (m_opts.bimPropsFile.empty() ? "null" : "\"" + JsonEscape(m_opts.bimPropsFile) + "\"") << ",\n"
+               << "  \"instances\": " << summary.total << ",\n"
+               << "  \"withSceneRow\": " << summary.withSceneRow << ",\n"
+               << "  \"withSidecarRow\": " << summary.withSidecarRow << ",\n"
+               << "  \"withRow\": " << summary.withRow << ",\n"
+               << "  \"withObjectId\": " << summary.withObjectId << ",\n"
+               << "  \"reservedCollisions\": " << summary.reservedCollisions << ",\n";
+            rj << "  \"droppedKeys\": [";
+            for (size_t i = 0; i < summary.droppedKeys.size(); ++i)
+                rj << (i ? ", " : "") << "\"" << JsonEscape(summary.droppedKeys[i]) << "\"";
+            rj << "],\n";
+            rj << "  \"idSourceCounts\": {";
+            bool first = true;
+            for (auto& kv : summary.idSourceCounts)
+            {
+                if (!first) rj << ",";
+                first = false;
+                rj << "\n    \"" << JsonEscape(kv.first) << "\": " << kv.second;
+            }
+            rj << (summary.idSourceCounts.empty() ? "" : "\n  ") << "},\n";
+            // Feature list (capped; full data lives in the batch tables).
+            constexpr size_t kMaxReportFeatures = 10000;
+            std::vector<std::string> feats;
+            feats.reserve(results.size());
+            for (size_t i = 0; i < results.size() && feats.size() < kMaxReportFeatures; ++i)
+            {
+                if (!results[i].row) continue;   // only matched features
+                std::ostringstream f;
+                f << "    {\"instance\": " << i
+                  << ", \"objectId\": \"" << JsonEscape(results[i].objectId)
+                  << "\", \"idSource\": \"" << JsonEscape(results[i].idSource)
+                  << "\", \"matchSource\": \"" << JsonEscape(results[i].matchSource)
+                  << "\", \"properties\": {";
+                bool fp = true;
+                for (const auto& kv : *results[i].row)
+                {
+                    if (!fp) f << ", ";
+                    fp = false;
+                    f << "\"" << JsonEscape(kv.first) << "\": ";
+                    switch (kv.second.type)
+                    {
+                    case BimValue::Type::Bool:   f << (kv.second.b ? "true" : "false"); break;
+                    case BimValue::Type::Int32:  f << kv.second.i32; break;
+                    case BimValue::Type::Int64:  f << kv.second.i64; break;
+                    case BimValue::Type::Double:
+                        if (std::isfinite(kv.second.d)) f << kv.second.d;
+                        else f << "null";        // never emit NaN/Infinity
+                        break;
+                    case BimValue::Type::Vec3:
+                        f << "[";
+                        for (int c = 0; c < 3; ++c)
+                        {
+                            if (c) f << ",";
+                            double d = kv.second.v3[c];
+                            if (std::isfinite(d)) f << d; else f << "null";
+                        }
+                        f << "]";
+                        break;
+                    case BimValue::Type::String: f << "\"" << JsonEscape(kv.second.s) << "\""; break;
+                    }
+                }
+                f << "}}";
+                feats.push_back(f.str());
+            }
+            rj << "  \"features\": [\n";
+            for (size_t i = 0; i < feats.size(); ++i)
+                rj << feats[i] << (i + 1 < feats.size() ? ",\n" : "\n");
+            rj << "  ],\n"
+               << "  \"featuresTruncated\": "
+               << (feats.size() >= kMaxReportFeatures ? "true" : "false") << "\n}\n";
+            std::ofstream rf(m_opts.bimReportFile);
+            if (rf) rf << rj.str();
+            else
+                std::cerr << "[TilesConverter] Warning: cannot write BIM report "
+                          << m_opts.bimReportFile << std::endl;
+        }
+    }
+
     // 1b. Auto-detect per-vertex mode: if the model span exceeds 3 km,
     // per-vertex correction eliminates the tangent-plane residual that would
     // otherwise reach ~60 cm at the model edges (d²/R at 3 km ≈ 70 cm).
@@ -573,7 +827,7 @@ bool TilesConverter::Convert(const aiScene* scene,
             return false;
         }
         writtenTiles += n;
-        std::cout << "[TilesConverter] 处理进度: "
+        std::cout << "[TilesConverter] Progress: "
                   << std::min(writtenTiles, totalTiles) << "/" << totalTiles << std::endl;
     }
 

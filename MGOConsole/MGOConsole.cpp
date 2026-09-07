@@ -37,6 +37,7 @@ namespace fs = std::filesystem;
 
 // Subcommand modules
 #include "TilesConverter.h"
+#include "BimBindingPipeline.h"
 #include "TerrainConverter.h"
 #include "ImageTiler.h"
 #include "GeoJSONConverter.h"
@@ -619,8 +620,30 @@ int main(int argc, char** argv)
                         return kExitUsage;
                     }
                 }
-                else if(arg == "--min-block" && i + 1 < argc) { if (!ParseDoubleSafe("tiles", "--min-block", argv[++i], opts.minBlockDistance)) return kExitUsage; }
+                else if (arg == "--min-block" && i + 1 < argc) { if (!ParseDoubleSafe("tiles", "--min-block", argv[++i], opts.minBlockDistance)) return kExitUsage; }
                 else if (arg == "--max-lod" && i + 1 < argc) { int v; if (!ParseIntSafe("tiles", "--max-lod", argv[++i], v)) return kExitUsage; opts.maxLODLevels = v; }
+                // ---- BIM property binding (see TilesConverter/BIM_BINDING_ARCHITECTURE.md §4.5) ----
+                else if (arg == "--bim-bind" || arg == "--bim-metadata")   opts.bimBind = true;
+                else if (arg == "--bim-no-scene-meta") opts.bimCollectSceneMetadata = false;
+                else if (arg == "--bim-no-inherit")     opts.bimInheritParents = false;
+                else if (arg == "--bim-props" && i + 1 < argc)
+                {
+                    opts.bimPropsFile = gbk_to_utf8(argv[++i]);
+                    // Passing a property table with binding left off was a
+                    // silent no-op (review #10): --bim-props implies --bim-bind.
+                    opts.bimBind = true;
+                }
+                else if (arg == "--bim-id-property" && i + 1 < argc) opts.bimIdPropertyKeys = argv[++i];
+                else if (arg == "--bim-strategy" && i + 1 < argc)     opts.bimStrategy = argv[++i];
+                else if (arg == "--bim-report" && i + 1 < argc)       opts.bimReportFile = gbk_to_utf8(argv[++i]);
+                else if (arg == "--bim-formats")
+                {
+                    std::string out;
+                    BimBindingPipeline::PrintFormats(out);
+                    std::cout << "Per-format BIM binding strategies (id source x metadata):\n"
+                              << out;
+                    return 0;
+                }
                 else if (int sr = ParseSimplifyArg("tiles", arg, i, argc, argv, simpl)) { if (sr == kExitUsage) return sr; }
                 else if (int gr = ParseGeorefArg("tiles", arg, i, argc, argv, georef)) { if (gr == kExitUsage) return gr; }
                 else if (arg == "-h" || arg == "--help")
@@ -644,7 +667,21 @@ int main(int argc, char** argv)
                               << "  --error <val>       Simplification error (default: 0.01)\n"
                               << "  --nweight <val>     Normal weight (default: 0.1)\n"
                               << "  --threshold <val>   Ratio threshold (default: 0.1, error-driven)\n"
-                              << "  --lock-border       Enable border vertex locking\n";
+                              << "  --lock-border       Enable border vertex locking\n"
+                              << "\n"
+                              << "  BIM property binding (per-format strategies):\n"
+                              << "  --bim-bind          Enable binding (off => byte-identical output)\n"
+                              << "                      (alias: --bim-metadata; implied by --bim-props)\n"
+                              << "  --bim-formats       List per-format id/metadata strategies and exit\n"
+                              << "  --bim-props <csv>   Sidecar property table (first column = join key;\n"
+                              << "                      RFC4180 quoting supported; implies --bim-bind)\n"
+                              << "  --bim-id-property <k1,k2>  Id keys override (searched in scene\n"
+                              << "                      metadata, then sidecar columns; default per\n"
+                              << "                      strategy: GlobalId,ElementId,ifcGUID,UniqueId)\n"
+                              << "  --bim-strategy <s>  Force strategy: ifc|fbx|gltf2|obj|3ds|generic\n"
+                              << "  --bim-report <f>    Write JSON transparency manifest\n"
+                              << "  --bim-no-scene-meta Skip scene-internal metadata (sidecar only)\n"
+                              << "  --bim-no-inherit    Skip ancestor-chain metadata inheritance\n";
                     return 0;
                 }
                 else if (!arg.empty() && arg[0] == '-')
@@ -663,6 +700,9 @@ int main(int argc, char** argv)
                 aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_GenBoundingBoxes);
             if (!scene) { std::cerr << "Failed to load: " << inputFile << std::endl; return 1; }
             opts.fbxDirectory = inputFile.substr(0, inputFile.find_last_of("/\\"));
+            // BIM strategy auto-detection: file name/extension is the
+            // reliable format signal (aiScene does not carry importer id).
+            opts.bimFormatHint = inputFile;
             return converter.Convert(scene, opts) ? 0 : 1;
         }
 

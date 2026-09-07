@@ -343,6 +343,44 @@ target_link_libraries(test_emptyprimitive PRIVATE
 )
 add_test(NAME test_emptyprimitive COMMAND test_emptyprimitive)
 
+# TilesConverter: BIM binding strategy layer (per-format id resolution,
+# sidecar join, pipeline merge semantics, feature batch dedup)
+add_executable(test_bimstrategy
+    TilesConverter/test/test_bimstrategy.cpp
+)
+target_include_directories(test_bimstrategy PRIVATE
+    TilesConverter
+    MeshProjectionErrorCorrector
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJ_SHIM_DIR}
+)
+target_link_libraries(test_bimstrategy PRIVATE
+    TilesConverter
+    TileBuilder
+    MeshProjectionErrorCorrector
+    assimp::assimp
+)
+add_test(NAME test_bimstrategy COMMAND test_bimstrategy)
+
+# TileBuilder: BIM batch table / _BATCHID writers (three-state columns,
+# b3dm 8-byte layout, componentType ladder, disabled-path byte identity)
+add_executable(test_batchtable
+    TileBuilder/test/test_batchtable.cpp
+)
+target_include_directories(test_batchtable PRIVATE
+    TileBuilder
+    MeshProjectionErrorCorrector
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJ_SHIM_DIR}
+)
+target_link_libraries(test_batchtable PRIVATE
+    TileBuilder
+    MeshProjectionErrorCorrector
+    assimp::assimp
+    PROJ::proj
+)
+add_test(NAME test_batchtable COMMAND test_batchtable)
+
 # GeoJSONConverter unit tests
 add_executable(test_geojson
     GeoJSONConverter/test/test_geojson.cpp

@@ -281,6 +281,25 @@ mgo osgb -i osgb_root_dir -o output_dir [options]
 
 Requires OpenSceneGraph (`MGO_WITH_OSG=ON`, on by default). Supports DJI Terra (`Block_*` directories) and ContextCapture (`Data/Tile_*` directories).
 
+## Web Service — moved to [MGOServer](https://github.com/Johnly1986/MGOServer)
+
+The Node.js visualization service lived here as `mgo-server/`; it is now its own
+repository, **[`Johnly1986/MGOServer`](https://github.com/Johnly1986/MGOServer)**. It exposes every
+`mgo` subcommand as an HTTP job API (REST + SSE progress), hosts the converted artifacts at
+`/ws/{jobId}/out/**` with Cesium-friendly headers, and ships a self-hosted CesiumJS viewer plus a
+job console. Nothing about this C++ repository changes — the service only consumes the built
+`MGOConsole` binary, so keep it as a sibling checkout:
+
+```bash
+git clone git@github.com:Johnly1986/MGOServer.git ../MGOServer
+cd ../MGOServer && npm ci && npm start     # 0.0.0.0:8080, client IP must be whitelisted
+```
+
+The service parses the CLI's English progress protocol (`[Module] Progress: X/Y` /
+`[Module] Done:`) — keep those output lines stable, or update
+`../MGOServer/src/jobs/progress.js` and its golden fixtures in the same change.
+Design doc moved along with it: `MGOServer/docs/VISUALIZATION_SERVICE_DESIGN.md`.
+
 ## Mesh Simplification
 
 All geometry-processing modules use the unified `SimplifyOptions` struct (vendored meshoptimizer v1.2):
