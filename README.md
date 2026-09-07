@@ -281,25 +281,6 @@ mgo osgb -i osgb_root_dir -o output_dir [options]
 
 Requires OpenSceneGraph (`MGO_WITH_OSG=ON`, on by default). Supports DJI Terra (`Block_*` directories) and ContextCapture (`Data/Tile_*` directories).
 
-## Web Service — moved to [MGOServer](https://github.com/Johnly1986/MGOServer)
-
-The Node.js visualization service lived here as `mgo-server/`; it is now its own
-repository, **[`Johnly1986/MGOServer`](https://github.com/Johnly1986/MGOServer)**. It exposes every
-`mgo` subcommand as an HTTP job API (REST + SSE progress), hosts the converted artifacts at
-`/ws/{jobId}/out/**` with Cesium-friendly headers, and ships a self-hosted CesiumJS viewer plus a
-job console. Nothing about this C++ repository changes — the service only consumes the built
-`MGOConsole` binary, so keep it as a sibling checkout:
-
-```bash
-git clone git@github.com:Johnly1986/MGOServer.git ../MGOServer
-cd ../MGOServer && npm ci && npm start     # 0.0.0.0:8080, client IP must be whitelisted
-```
-
-The service parses the CLI's English progress protocol (`[Module] Progress: X/Y` /
-`[Module] Done:`) — keep those output lines stable, or update
-`../MGOServer/src/jobs/progress.js` and its golden fixtures in the same change.
-Design doc moved along with it: `MGOServer/docs/VISUALIZATION_SERVICE_DESIGN.md`.
-
 ## Mesh Simplification
 
 All geometry-processing modules use the unified `SimplifyOptions` struct (vendored meshoptimizer v1.2):
@@ -354,38 +335,6 @@ Eigen::Matrix4d transform = engine.ComputeRootTransform();  // column-major ENU-
 CesiumJS applies `Y_UP_TO_Z_UP` at runtime to convert the glTF content from Y-up to Z-up. The tileset `transform` (root ENU->ECEF matrix) and per-tile `boundingVolume.box` are written in the Cesium Z-up frame. Coordinate transforms flow through `AxisMapper` (single source of truth for all axis conversions).
 
 Terrain vertex normals (Quantized-Mesh OctVertexNormals extension) are ECEF-space normals: CesiumJS decodes and uses them directly as model-coordinate normals (`normalMC = czm_octDecode(...)`), so no ENU rotation is applied at encode time.
-
-## Testing
-
-```bash
-# Unit tests (executables are under build/bin/, or build/bin/Release on VS generator)
-./build/bin/test_georef       # IGeoreferencing: 7-param, anchor, multi-position
-./build/bin/test_osgb_unit    # Parser, vendor handler, data structures
-./build/bin/test_boundary     # Boundary values across all modules
-
-# Synthetic terrain data + verification
-python3 Script/Test/generate_test_tif.py
-python3 Script/Test/full_spec_verify.py <output_dir>
-
-# PROJ validation
-./build/bin/MGOConsole --proj-test
-```
-
-## Project Structure
-
-```
-MGO/
-├── MGOConsole/           Unified CLI (all subcommands)
-├── MeshGroupOptimizer/   Mesh simplification (vendored meshoptimizer v1.2)
-├── MeshProjectionErrorCorrector/  PROJ transforms, georeferencing, octree, shared utilities
-├── TileBuilder/          3D Tiles binary builders (GlbBuilder, B3dmBuilder, TilesetWriter)
-├── TilesConverter/       Assimp -> 3D Tiles pipeline
-├── TerrainConverter/     GeoTIFF -> Quantized-Mesh terrain pipeline
-├── DOMConverter/         DOM orthophoto -> TMS image tiles (ImageTiler)
-├── OSGBConverter/        OSGB oblique photography -> 3D Tiles
-├── Script/               Verification and utility scripts
-└── CMakeLists.txt        Unified CMake build (cross-platform)
-```
 
 ## Dependencies
 
