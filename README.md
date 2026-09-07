@@ -32,6 +32,7 @@ Highlights:
 - Per-vertex projection correction for large sites (>3 km) to eliminate tangent-plane curvature residual.
 - Correct Y-up/Z-up handling per input format (glTF-style Y-up FBX vs pre-rotated Z-up FBX).
 - Crack-free border-locked mesh simplification powered by a vendored, extended meshoptimizer.
+- BIM property binding: per-format ID/attribute resolution and external ledger CSV join into the 3D Tiles Batch Table (`feature.properties`), with a per-instance transparency report and legacy encoding repair.
 - Parallel terrain tile generation; Cesium-compatible `layer.json` / tileset output out of the box.
 
 ## Requirements
@@ -193,8 +194,37 @@ mgo tiles -i model.fbx -o output_dir [options]
 | `--nweight <val>` | Normal weight | 0.1 |
 | `--threshold <val>` | Ratio threshold (0 = error-driven) | 0.1 |
 | `--lock-border` | Enable border vertex locking | off |
+| `--bim-bind` | Enable BIM property binding (alias `--bim-metadata`; implied by `--bim-props`) | off |
+| `--bim-props <csv>` | Sidecar property table (first column = join key, RFC4180 quoting) | - |
+| `--bim-id-property <k1,k2>` | ID key override - searched in scene metadata, then sidecar columns | per-strategy defaults |
+| `--bim-strategy <s>` | Force binding strategy: `ifc` / `fbx` / `gltf2` / `obj` / `3ds` / `generic` | by importer |
+| `--bim-report <f>` | Write per-instance transparency manifest (JSON) | - |
+| `--bim-formats` | List per-format ID/metadata strategies and exit | - |
+| `--bim-no-scene-meta` | Sidecar-only mode (skip scene-internal metadata) | off |
+| `--bim-no-inherit` | Skip ancestor-chain metadata inheritance | off |
 
 Models spanning more than 3 km automatically enable per-vertex projection correction to eliminate tangent-plane curvature residual.
+
+### BIM Property Binding (`mgo tiles --bim-*`)
+
+Per-feature business attributes are embedded into each b3dm Batch Table (readable in Cesium as `feature.properties`), resolved through per-format strategies (IFC / FBX / glTF2 / OBJ / 3DS / Generic) plus an optional external property table:
+
+```bash
+# Model-internal IDs/properties (IFC GlobalId, FBX/glTF UDP metadata):
+./build/bin/MGOConsole tiles -i model.ifc -o out --bim-bind
+
+# Join an external ledger CSV (first column = join key, e.g. node names or GUIDs):
+./build/bin/MGOConsole tiles -i model.fbx -o out --bim-props ledger.csv \
+    --bim-report out/bim_report.json
+```
+
+- **ID resolution chain** (each instance's winning source is reported transparently): IFC name-tail GUID → explicit `--bim-id-property` keys (scene metadata, then sidecar) → per-format default keys (`GlobalId`, `ElementId`, `ifcGUID`, `UniqueId`) → sidecar ID columns → full node name as weak fallback.
+- **Sidecar CSV**: RFC4180 quoting (commas, doubled `""`, embedded newlines), UTF-8 BOM tolerated; unquoted numeric cells promote to typed binary columns (Int32/Int64/Double), everything else stays a string - quoted `"0042"` never becomes `42`.
+- **Fail-fast**: an unreadable sidecar aborts the run with exit 1 instead of silently dropping all attributes.
+- **Legacy encoding repair**: GBK/GB18030 node names baked by Windows exporters are converted to valid UTF-8 (Win32 CP_ACP / POSIX iconv; lossy U+FFFD only as last resort), so Chinese object names survive into the Batch Table.
+- **Zero impact when off**: without `--bim-*` flags the output is byte-identical to the classic geometry-only pipeline; binding never alters georeferencing, tiling or simplification. A sidecar that matches no instance warns and falls back to the legacy path.
+
+Full design contract and verification matrix: [`TilesConverter/BIM_BINDING_ARCHITECTURE.md`](TilesConverter/BIM_BINDING_ARCHITECTURE.md).
 
 ### mgo terrain - Terrain Tiles
 
@@ -354,6 +384,7 @@ All dependencies are managed via vcpkg + `vcpkg.json` with a pinned builtin-base
 | zlib | 1.3.0 | `find_package(ZLIB 1.3.0)` |
 | OpenSceneGraph | 3.6.5 | `find_package(OpenSceneGraph 3.6.5)` |
 | meshoptimizer | v1.2 vendored | `add_library(meshoptimizer STATIC)` |
+| iconv | POSIX auto-detected | GBK/GB18030 → UTF-8 name repair (`check_include_file_cxx`; absent → lossy-safe U+FFFD fallback) |
 
 ## License
 
