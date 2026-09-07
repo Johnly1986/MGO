@@ -220,9 +220,6 @@ Per-feature business attributes are embedded into each b3dm Batch Table (readabl
 
 - **ID resolution chain** (each instance's winning source is reported transparently): IFC name-tail GUID → explicit `--bim-id-property` keys (scene metadata, then sidecar) → per-format default keys (`GlobalId`, `ElementId`, `ifcGUID`, `UniqueId`) → sidecar ID columns → full node name as weak fallback.
 - **Sidecar CSV**: RFC4180 quoting (commas, doubled `""`, embedded newlines), UTF-8 BOM tolerated; unquoted numeric cells promote to typed binary columns (Int32/Int64/Double), everything else stays a string - quoted `"0042"` never becomes `42`.
-- **Fail-fast**: an unreadable sidecar aborts the run with exit 1 instead of silently dropping all attributes.
-- **Legacy encoding repair**: GBK/GB18030 node names baked by Windows exporters are converted to valid UTF-8 (Win32 CP_ACP / POSIX iconv; lossy U+FFFD only as last resort), so Chinese object names survive into the Batch Table.
-- **Zero impact when off**: without `--bim-*` flags the output is byte-identical to the classic geometry-only pipeline; binding never alters georeferencing, tiling or simplification. A sidecar that matches no instance warns and falls back to the legacy path.
 
 Full design contract and verification matrix: [`TilesConverter/BIM_BINDING_ARCHITECTURE.md`](TilesConverter/BIM_BINDING_ARCHITECTURE.md).
 
