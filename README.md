@@ -385,6 +385,6 @@ All dependencies are managed via vcpkg + `vcpkg.json` with a pinned builtin-base
 
 ## License
 
-Copyright Johnlyon. Licensed under the [Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE), MGO is free for both commercial and non-commercial use.
 
 Third-party component licenses are acknowledged in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
