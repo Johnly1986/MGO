@@ -1249,8 +1249,14 @@ static int RunMesh(int argc, char** argv)
         std::cerr << u8"mgo mesh: -C 只接受 original 或 left, 得到 '" << coordSys << "'" << std::endl;
         return kExitUsage;
     }
-    if (!outputFileName.empty()) mgo.Save(outputFileName, coordSys == "left");
+    // Save() 的返回值必须检查：导出失败（不支持的扩展名、磁盘/权限问题）时
+    // 旧代码仍然打印“优化完成”并返回 0，调用方会误以为已生成产物
+    if (!outputFileName.empty() && !mgo.Save(outputFileName, coordSys == "left"))
+    {
+        std::cerr << u8"mgo mesh: 导出失败: " << outputFileName << std::endl;
+        return kExitFail;
+    }
 
     std::cout << u8"优化完成 !" << std::endl;
-    return 0;
+    return kExitOk;
 }

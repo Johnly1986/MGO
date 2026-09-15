@@ -4,6 +4,9 @@
 #include "MeshGroupOptimizer.h"
 #include <assimp/Importer.hpp>
 #include <assimp/Exporter.hpp>
+
+#include <algorithm>
+#include <filesystem>
 #include <assimp/postprocess.h>
 #include <assimp/scene.h>
 #include <assimp/ProgressHandler.hpp>
@@ -35,6 +38,7 @@ std::string GetFileExtension(const std::string& filename)
 const aiScene* CMeshGroupOptimizer::Load(const std::string& filename, bool rebuild)
 {
 	if (importer) { delete importer; importer = nullptr; m_scene = nullptr; }
+	m_inputFilePath = filename;
 	importer = new Assimp::Importer();
 	std::string extension = GetFileExtension(filename);
 	unsigned int options = rebuild ? aiProcessPreset_TargetRealtime_MaxQuality : aiProcess_GenSmoothNormals | aiProcess_Triangulate;
@@ -111,12 +115,87 @@ bool CMeshGroupOptimizer::Save(const std::string& filename, bool isConvertLeftHa
 	Assimp::Exporter exporter;
 	std::string extension = GetFileExtension(filename);
 
+	// assimp registers its legacy glTF 1.0 exporters as "glb"/"gltf"; the 2.0
+	// ones are "glb2"/"gltf2".  glTF 1.0 is not readable by Cesium (>=1.100 is
+	// 2.0-only) nor by current tooling: loading such a .glb in the viewer dies
+	// with "Failed to load model ... reading 'buffer'".  Route the two
+	// extensions to the 2.0 exporters (the file name/extension on disk is
+	// unchanged — assimp takes the exporter by id, then writes to `filename`).
+	if (extension == "glb") extension = "glb2";
+	else if (extension == "gltf") extension = "gltf2";
+	if (extension == "glb2" || extension == "gltf2")
+		RelocateExternalTextures(filename);
+
 	unsigned int options =
 		aiProcess_JoinIdenticalVertices |
 		aiProcess_Triangulate;
 	if (isConvertLeftHand) options |= aiProcess_ConvertToLeftHanded;
 
 	return exporter.Export(m_scene, extension, filename, options) == AI_SUCCESS;
+}
+
+bool CMeshGroupOptimizer::RelocateExternalTextures(const std::string& outFile)
+{
+	if (!m_scene || !m_scene->HasMaterials()) return false;
+
+	namespace fs = std::filesystem;
+	std::error_code ec;
+
+	const fs::path outDir = fs::path(outFile).parent_path();
+	const fs::path modelDir = fs::path(m_inputFilePath).parent_path();
+
+	for (unsigned int mi = 0; mi < m_scene->mNumMaterials; ++mi)
+	{
+		aiMaterial* material = m_scene->mMaterials[mi];
+		if (!material) continue;
+
+		for (int type = aiTextureType_DIFFUSE; type <= AI_TEXTURE_TYPE_MAX; ++type)
+		{
+			const aiTextureType ttype = static_cast<aiTextureType>(type);
+			const unsigned int count = material->GetTextureCount(ttype);
+			for (unsigned int ti = 0; ti < count; ++ti)
+			{
+				aiString texPath;
+				if (material->GetTexture(ttype, ti, &texPath) != AI_SUCCESS) continue;
+
+				const std::string raw = texPath.C_Str();
+				if (raw.empty() || raw[0] == '*') continue;   // 已内嵌或未设置
+
+				// Windows 导出的模型常把贴图写成 `E:\dir\tex.png`，而 POSIX 的
+				// path::filename() 不认反斜杠（会原样返回整串），先统一分隔符
+				std::string norm = raw;
+				std::replace(norm.begin(), norm.end(), '\\', '/');
+
+				const std::string base = fs::path(norm).filename().string();
+				if (base.empty()) continue;
+
+				// 先在原路径找，再退回模型所在目录（FBX 常把贴图目录存成绝对路径）
+				fs::path src;
+				if (fs::exists(norm, ec)) src = norm;
+				else {
+					fs::path candidate = modelDir / base;
+					if (fs::exists(candidate, ec)) src = candidate;
+				}
+
+				if (!src.empty() && !outDir.empty())
+				{
+					const fs::path dst = outDir / base;
+					if (src != dst) fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
+				}
+
+				// 无论是否复制成功都改写为相对文件名：绝对路径（尤其 Windows 盘符）
+				// 在浏览器里是无效 URL，只会产生 CORS/加载失败噪声
+				if (raw != base)
+				{
+					aiString rel(base.c_str());
+					material->RemoveProperty(AI_MATKEY_TEXTURE(ttype, ti));
+					material->AddProperty(&rel, AI_MATKEY_TEXTURE(ttype, ti));
+					aiString chk; material->GetTexture(ttype, ti, &chk);
+				}
+			}
+		}
+	}
+	return true;
 }
 
 bool CMeshGroupOptimizer::SimplifyScene(const aiScene* scene, const OptimizerConfig& config)
@@ -315,6 +394,9 @@ bool CMeshGroupOptimizer::PerformOptimization(aiMesh* mesh, const OptimizerItem&
 		}
 	}
 
+	// uvs 向量按顶点数预分配，所以「无 UV」的网格在下方重建分支里也会得到一条全 0
+	// 的 UV 通道（历史行为，TileBuilder 同样按此语义补零）——重建时必须同步声明
+	// 分量数，否则违反 assimp 不变式，见下。
 	if (mesh->HasTextureCoords(0))
 	{
 		for(unsigned int vi = 0; vi < mesh->mNumVertices; vi++)
@@ -377,6 +459,13 @@ bool CMeshGroupOptimizer::PerformOptimization(aiMesh* mesh, const OptimizerItem&
 		delete[] mesh->mTextureCoords[0]; mesh->mTextureCoords[0] = new aiVector3D[optimizerVerticesNum];
 		for (unsigned int vi = 0; vi < optimizerVerticesNum; vi++)
 			mesh->mTextureCoords[0][vi] = aiVector3D(uvs[vi].x, uvs[vi].y, 0);
+
+		// 我们写入的是二维 UV，必须同步声明分量数：导入器给「无 UV」网格留下的
+		// mNumUVComponents[0] == 0，而 assimp 的不变式是「mTextureCoords[i] 非空
+		// ⟹ mNumUVComponents[i] ≥ 1」。FBX 导出器按
+		// `uv_data[uvi].size() / mNumUVComponents[uvi]` 做整数除法 → 除零 SIGFPE：
+		// 修复前 `mesh -i any.obj -o out.fbx` 必然崩溃。
+		mesh->mNumUVComponents[0] = 2;
 	}
 
 	delete[] mesh->mTangents;  mesh->mTangents = NULL;

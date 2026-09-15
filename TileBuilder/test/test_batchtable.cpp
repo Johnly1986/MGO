@@ -102,7 +102,7 @@ static void TestBatchTableThreeState()
     CHECK(BatchTableWriter::Build(rows, json, bin));
 
     // "h": binary DOUBLE column, 3 rows x 8B = 24B (no float32 downcast)
-    CHECK(json.find("\"h\":{\"byteOffset\":0,\"componentType\":5128,\"type\":\"SCALAR\"}") != std::string::npos);
+    CHECK(json.find("\"h\":{\"byteOffset\":0,\"componentType\":\"DOUBLE\",\"type\":\"SCALAR\"}") != std::string::npos);
     CHECK(bin.size() == 24);
     double d0;
     std::memcpy(&d0, bin.data(), 8);
@@ -132,7 +132,7 @@ static void TestBatchTableThreeState()
         { "v", BimValue::MakeVec3(4, 5, 6) } }));
     std::string j3; std::vector<uint8_t> b3;
     CHECK(BatchTableWriter::Build(vrows, j3, b3));
-    CHECK(j3.find("\"v\":{\"byteOffset\":0,\"componentType\":5126,\"type\":\"VEC3\"}") != std::string::npos);
+    CHECK(j3.find("\"v\":{\"byteOffset\":0,\"componentType\":\"FLOAT\",\"type\":\"VEC3\"}") != std::string::npos);
     CHECK(b3.size() == 24);
 
     // Int32 column present in every row -> binary INT(5124) (doc §4.8(3):
@@ -146,7 +146,7 @@ static void TestBatchTableThreeState()
     size_t nullified4 = 12345;
     CHECK(BatchTableWriter::Build(irows, j4, b4, &nullified4));
     CHECK(j4.find("\"b\":[true,false]") != std::string::npos);
-    CHECK(j4.find("\"n\":{\"byteOffset\":0,\"componentType\":5124,\"type\":\"SCALAR\"}") != std::string::npos);
+    CHECK(j4.find("\"n\":{\"byteOffset\":0,\"componentType\":\"INT\",\"type\":\"SCALAR\"}") != std::string::npos);
     CHECK(b4.size() == 8);
     int32_t n0, n1;
     std::memcpy(&n0, b4.data(), 4);
@@ -179,7 +179,7 @@ static void TestBatchTableThreeState()
     CHECK(j7.find("nan") == std::string::npos && j7.find("inf") == std::string::npos);
     CHECK(nullified7 == 2);
     // numeric "k" column unaffected -> INT binary column, 8 bytes
-    CHECK(j7.find("\"k\":{\"byteOffset\":0,\"componentType\":5124,\"type\":\"SCALAR\"}") != std::string::npos);
+    CHECK(j7.find("\"k\":{\"byteOffset\":0,\"componentType\":\"INT\",\"type\":\"SCALAR\"}") != std::string::npos);
     CHECK(b7.size() == 8);
 
     // String escaping incl. control chars; JSON double precision round-trips

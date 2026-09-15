@@ -1,0 +1,161 @@
+From: MGO <dev@mgo.local>
+Subject: [PATCH] glTF2 exporter: fix heap corruption in MergeMeshes()
+
+assimp v6.0.5's glTF2Exporter::MergeMeshes() merges a node's several meshes
+into one and, in the process, removes the merged meshes from the asset's mesh
+list while still walking it.  AssetList::Remove() deletes the mesh object and
+shifts every later object down one index, so
+
+  * the erase-loop advanced its cursor after an erase (skipping the entry that
+    shifted into that slot), and
+  * a node's own list could keep a stale (vector*, index) Ref
+
+which leaves nodes pointing at freed meshes: AddressSanitizer reports
+heap-use-after-free and a plain build aborts with
+  "double free or corruption (!prev)"
+inside MergeMeshes.  Every multi-mesh node triggers it, i.e. any real BIM /
+engineering model exported to .glb/.gltf (the legacy glTF 1.0 exporter does not
+run this code, which is why it went unnoticed).
+
+Rewrite it index-mutation-free: resolve the node -> mesh mapping to stable ids,
+merge primitives without touching the asset, drop the merged meshes once, then
+rebuild every node's mesh list from the surviving ids.  Meshes that are some
+node's first entry are never dropped (other nodes still use them).
+
+Apply with:  patch -p1 -N -i assimp-v6.0.5-glTF2-merge-meshes.patch
+(from the assimp source root; MGO's CMake applies it automatically)
+--- a/code/AssetLib/glTF2/glTF2Exporter.cpp
++++ b/code/AssetLib/glTF2/glTF2Exporter.cpp
+@@ -1455,49 +1455,94 @@
+ 
+ // Merges a node's multiple meshes (with one primitive each) into one mesh with multiple primitives
+ void glTF2Exporter::MergeMeshes() {
+-    for (unsigned int n = 0; n < mAsset->nodes.Size(); ++n) {
++    // glTF nodes carry a single mesh, so an aiNode holding several meshes has to
++    // be collapsed into one mesh with several primitives.
++    //
++    // MGO patch: the upstream (and our first) implementation shuffled the asset
++    // mesh list while walking it -- AssetList::Remove() deletes the mesh and
++    // shifts every later object down one slot, so any (vector*, index) Ref taken
++    // before the removal silently starts pointing at a different object, and a
++    // node's own list could keep a stale index that dereferences freed memory
++    // ("double free or corruption (!prev)" / heap-use-after-free).  Real models
++    // with multi-mesh nodes (any BIM/engineering FBX) hit it immediately.
++    //
++    // Instead: resolve every node's meshes to stable ids, merge primitives with
++    // no mutation at all, then drop the merged meshes once and rebuild every
++    // node's mesh list from ids.  No index bookkeeping survives a mutation.
++    const unsigned int nodeCount = mAsset->nodes.Size();
++    if (!nodeCount || mAsset->meshes.Size() == 0) {
++        return;
++    }
++
++    // 1) freeze the current node -> mesh-id mapping
++    std::vector<std::vector<std::string>> nodeMeshIds(nodeCount);
++    for (unsigned int n = 0; n < nodeCount; ++n) {
+         Ref<Node> node = mAsset->nodes.Get(n);
++        for (size_t i = 0; i < node->meshes.size(); ++i) {
++            const unsigned int mi = node->meshes[i].GetIndex();
++            if (mi < mAsset->meshes.Size()) {
++                nodeMeshIds[n].push_back(mAsset->meshes.Get(mi)->id);
++            }
++        }
++    }
+ 
+-        unsigned int nMeshes = static_cast<unsigned int>(node->meshes.size());
++    // a mesh that is some node's first entry must survive (other nodes keep it)
++    std::set<std::string> mustKeep;
++    for (unsigned int n = 0; n < nodeCount; ++n) {
++        if (!nodeMeshIds[n].empty()) {
++            mustKeep.insert(nodeMeshIds[n][0]);
++        }
++    }
+ 
+-        // skip if it's 1 or less meshes per node
+-        if (nMeshes > 1) {
+-            Ref<Mesh> firstMesh = node->meshes.at(0);
+-
+-            // loop backwards to allow easy removal of a mesh from a node once it's merged
+-            for (unsigned int m = nMeshes - 1; m >= 1; --m) {
+-                Ref<Mesh> mesh = node->meshes.at(m);
+-
+-                // append this mesh's primitives to the first mesh's primitives
+-                firstMesh->primitives.insert(
+-                        firstMesh->primitives.end(),
+-                        mesh->primitives.begin(),
+-                        mesh->primitives.end());
+-
+-                // remove the mesh from the list of meshes
+-                unsigned int removedIndex = mAsset->meshes.Remove(mesh->id.c_str());
+-
+-                // find the presence of the removed mesh in other nodes
+-                for (unsigned int nn = 0; nn < mAsset->nodes.Size(); ++nn) {
+-                    Ref<Node> curNode = mAsset->nodes.Get(nn);
+-
+-                    for (unsigned int mm = 0; mm < curNode->meshes.size(); ++mm) {
+-                        Ref<Mesh> &meshRef = curNode->meshes.at(mm);
+-                        unsigned int meshIndex = meshRef.GetIndex();
+-
+-                        if (meshIndex == removedIndex) {
+-                            curNode->meshes.erase(curNode->meshes.begin() + mm);
+-                        } else if (meshIndex > removedIndex) {
+-                            Ref<Mesh> newMeshRef = mAsset->meshes.Get(meshIndex - 1);
+-
+-                            meshRef = newMeshRef;
+-                        }
+-                    }
+-                }
++    // 2) merge without mutating the asset
++    std::set<std::string> dropped;
++    for (unsigned int n = 0; n < nodeCount; ++n) {
++        std::vector<std::string> &ids = nodeMeshIds[n];
++        if (ids.size() <= 1) {
++            continue;
++        }
++        Ref<Mesh> firstMesh = mAsset->meshes.Get(ids[0].c_str());
++        for (size_t i = 1; i < ids.size(); ++i) {
++            if (ids[i] == ids[0]) {
++                continue; // duplicate reference to the target mesh: nothing to merge
++            }
++            Ref<Mesh> mesh = mAsset->meshes.Get(ids[i].c_str());
++            firstMesh->primitives.insert(
++                    firstMesh->primitives.end(),
++                    mesh->primitives.begin(),
++                    mesh->primitives.end());
++            if (!mustKeep.count(ids[i])) {
++                dropped.insert(ids[i]);
+             }
++        }
++    }
++
++    // 3) drop the merged meshes (indices shift here, but nothing refers to them
++    //    by index any more)
++    for (std::set<std::string>::const_iterator it = dropped.begin(); it != dropped.end(); ++it) {
++        if (mAsset->meshes.Get(it->c_str())) {
++            mAsset->meshes.Remove(it->c_str());
++        }
++    }
+ 
+-            // since we were looping backwards, reverse the order of merged primitives to their original order
+-            std::reverse(firstMesh->primitives.begin() + 1, firstMesh->primitives.end());
++    // 4) rebuild node mesh lists from the surviving ids, in their original order
++    std::map<std::string, unsigned int> finalIndex;
++    for (unsigned int i = 0; i < mAsset->meshes.Size(); ++i) {
++        finalIndex[mAsset->meshes.Get(i)->id] = i;
++    }
++    for (unsigned int n = 0; n < nodeCount; ++n) {
++        Ref<Node> node = mAsset->nodes.Get(n);
++        node->meshes.clear();
++        std::set<std::string> seen;
++        for (size_t i = 0; i < nodeMeshIds[n].size(); ++i) {
++            const std::string &id = nodeMeshIds[n][i];
++            if (dropped.count(id) || !seen.insert(id).second) {
++                continue; // merged away, or a duplicate reference
++            }
++            std::map<std::string, unsigned int>::const_iterator f = finalIndex.find(id);
++            if (f != finalIndex.end()) {
++                node->meshes.push_back(mAsset->meshes.Get(f->second));
++            }
+         }
+     }
+ }

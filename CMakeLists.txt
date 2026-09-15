@@ -166,14 +166,59 @@ else()
     message(STATUS "assimp: will download v6.0.5 from GitHub (will cache to ThirdParty/assimp-src/)")
 endif()
 
+# ---------------------------------------------------------------------------
+# assimp local patch: glTF2 exporter MergeMeshes() heap corruption
+#
+# assimp v6.0.5 removes merged meshes from the asset list while still walking
+# it; AssetList::Remove() deletes the mesh and shifts later objects down one
+# index, so stale (vector*, index) Refs survive and nodes end up pointing at
+# freed meshes.  Result: heap-use-after-free / "double free or corruption
+# (!prev)" for every multi-mesh node, i.e. any real BIM model exported to
+# .glb/.gltf.  See ThirdParty/patches/ for the patch and its full write-up.
+# ---------------------------------------------------------------------------
+set(MGO_ASSIMP_PATCH "${CMAKE_SOURCE_DIR}/ThirdParty/patches/assimp-v6.0.5-glTF2-merge-meshes.patch")
+find_program(MGO_PATCH_EXE patch)
+
 if(_assimp_source_dir)
+    # project-local / user-provided source: apply in place, once
+    if(EXISTS "${MGO_ASSIMP_PATCH}" AND EXISTS "${_assimp_source_dir}/code/AssetLib/glTF2/glTF2Exporter.cpp")
+        file(READ "${_assimp_source_dir}/code/AssetLib/glTF2/glTF2Exporter.cpp" _mgo_gltf2_src)
+        if(NOT _mgo_gltf2_src MATCHES "MGO patch: the upstream")
+            if(MGO_PATCH_EXE)
+                execute_process(
+                    COMMAND "${MGO_PATCH_EXE}" -p1 -N -i "${MGO_ASSIMP_PATCH}"
+                    WORKING_DIRECTORY "${_assimp_source_dir}"
+                    RESULT_VARIABLE _mgo_patch_rc
+                    OUTPUT_VARIABLE _mgo_patch_out
+                    ERROR_VARIABLE _mgo_patch_err)
+                if(_mgo_patch_rc EQUAL 0)
+                    message(STATUS "assimp: applied MGO patch (glTF2 MergeMeshes)")
+                else()
+                    message(WARNING "assimp: MGO patch failed (rc=${_mgo_patch_rc}): ${_mgo_patch_err}")
+                endif()
+            else()
+                message(WARNING "assimp: 'patch' tool not found - .glb/.gltf export of multi-mesh models may crash")
+            endif()
+        endif()
+    endif()
     FetchContent_Declare(assimp SOURCE_DIR ${_assimp_source_dir})
 else()
-    FetchContent_Declare(assimp
-        GIT_REPOSITORY https://github.com/assimp/assimp.git
-        GIT_TAG v6.0.5
-        GIT_SHALLOW TRUE
-    )
+    # freshly downloaded source: let FetchContent apply the patch itself
+    if(EXISTS "${MGO_ASSIMP_PATCH}" AND MGO_PATCH_EXE)
+        FetchContent_Declare(assimp
+            GIT_REPOSITORY https://github.com/assimp/assimp.git
+            GIT_TAG v6.0.5
+            GIT_SHALLOW TRUE
+            PATCH_COMMAND "${MGO_PATCH_EXE}" -p1 -N -i "${MGO_ASSIMP_PATCH}"
+        )
+    else()
+        message(WARNING "assimp: MGO patch file/tool unavailable - relying on pristine v6.0.5")
+        FetchContent_Declare(assimp
+            GIT_REPOSITORY https://github.com/assimp/assimp.git
+            GIT_TAG v6.0.5
+            GIT_SHALLOW TRUE
+        )
+    endif()
 endif()
 
 set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)

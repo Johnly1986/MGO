@@ -160,6 +160,12 @@ public:
     static bool SimplifyScene(const aiScene* scene, const OptimizerConfig& config);
 
 private:
+    /** 导出 glTF（.glb/.gltf）前把材质引用的外部贴图复制到输出目录并改写为相对
+     *  文件名：源模型（尤其 Windows 导出的 FBX）常把贴图存成绝对路径
+     *  （`e:\...\tex.png`），原样写进 glTF 会让浏览器/Cesium 去请求一个不存在
+     *  的跨域 URL（前端报 CORS/加载失败，贴图丢失）。*/
+    bool RelocateExternalTextures(const std::string& outFile);
+
     static bool GetMatchedOptimizerItem(const std::string& name, const OptimizerConfig& config, OptimizerItem& optimizerItem);
     static unsigned int GetSimplificationOptions(const OptimizerItem& optimizerItem);
     static size_t MergeVertices(std::vector<unsigned int>& indices, std::vector<Vector3>& vertices, std::vector<Vector3>& normals, std::vector<Vector2>& uvs);
@@ -170,4 +176,5 @@ private:
     Assimp::Importer*   importer;
     bool                m_rebuild;
     const aiScene*      m_scene;                // 存储加载的网格数据
+    std::string         m_inputFilePath;        // 输入模型路径（解析外部贴图用）
 };

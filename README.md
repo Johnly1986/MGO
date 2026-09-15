@@ -101,6 +101,59 @@ The `mgo` executable is `MGOConsole`; depending on platform and generator it lan
 ./build/bin/Release/MGOConsole.exe help
 ```
 
+### Bundled dependency patch (assimp v6.0.5)
+
+The build applies one local patch to the vendored/cached assimp source, shipped in
+[`ThirdParty/patches/`](ThirdParty/patches/) and applied automatically by CMake
+(`patch -p1`, idempotent; the configure log prints `assimp: applied MGO patch`):
+
+- `assimp-v6.0.5-glTF2-merge-meshes.patch` — fixes a heap-use-after-free in
+  `glTF2Exporter::MergeMeshes()`. The upstream code removed merged meshes from the
+  asset list while still walking it; `AssetList::Remove()` deletes the mesh and
+  shifts later objects down one index, so stale `(vector*, index)` refs survived and
+  nodes pointed at freed meshes. Every node holding more than one mesh aborted the
+  export of `.glb`/`.gltf` with `double free or corruption (!prev)` (the legacy
+  glTF 1.0 path never ran that code, which is why it went unnoticed). The patched
+  version resolves node→mesh mapping to ids, merges without mutating the asset,
+  then rebuilds node lists once.
+
+If `patch` is unavailable the build continues with pristine assimp and warns.
+
+### Mesh exporter fixes
+
+`mgo mesh` carries three fixes on top of the upstream exporter path:
+
+- **glTF 2.0 by default** — assimp registers its legacy glTF 1.0 exporters as
+  `glb`/`gltf` and the 2.0 ones as `glb2`/`gltf2`. `CMeshGroupOptimizer::Save()`
+  now routes the two file extensions to the 2.0 exporters, so `.glb`/`.gltf`
+  output is glTF 2.0 (Cesium ≥1.100 parses 2.0 only; a 1.0 file fails to load with
+  `reading 'buffer'`).
+- **External textures are relocated** — FBX materials often store an absolute
+  Windows path (`E:\dir\tex.png`). On POSIX `path::filename()` does not split on
+  `\`, so the texture was neither copied nor referenced usefully. Export now
+  normalises separators, writes the texture basename into the glTF and copies the
+  file next to the output (`root.glb` + `zhuipo.png`), which the viewer resolves
+  through a relative URI.
+- **Export failures are reported** — `MGOConsole mesh` used to print
+  `优化完成 !` and exit 0 even when `Save()` returned false (unsupported
+  extension, unwritable path), leaving callers with a silent empty result. The
+  return value is now checked: a failed export exits non-zero with
+  `mgo mesh: 导出失败: <file>`.
+
+### BIM Batch Table fixes
+
+- **Binary column `componentType` is a spec string enum** — `BatchTableWriter`
+  used to emit glTF-style numbers (`5124`/`5126`/`5128`) in the Batch Table JSON
+  property descriptors. The 3D Tiles Table format requires the string enums
+  `"INT"`/`"FLOAT"`/`"DOUBLE"` (plus the other six names), and CesiumJS's
+  `parseBatchTable` switches on those strings: with a number it resolves the
+  component type to `undefined`, calls `createArrayBufferView(undefined, …)` and
+  throws `TypeError: Cannot read properties of undefined (reading 'buffer')`,
+  which makes **every b3dm with a binary Batch Table column fail to load** —
+  i.e. any tile produced with `--bim-bind`. Writers now emit the spec strings;
+  the GLB accessors inside the tile still use the numeric glTF enums, which is
+  correct there.
+
 ## Quick Tour (verified examples)
 
 The commands below were tested end-to-end.

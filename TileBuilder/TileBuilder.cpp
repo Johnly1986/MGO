@@ -905,7 +905,14 @@ bool BatchTableWriter::Build(const std::vector<std::shared_ptr<const BimProperty
         if (ci.present == 0) continue;   // all-null column -> omitted
 
         // Binary eligibility (componentType mapping per §4.8(3)).
-        uint32_t compType = 0; size_t alignTo = 0; const char* typeName = "";
+        //
+        // 3D Tiles 的 Batch Table 二进制列描述符里 componentType 是**字符串枚举**
+        // ("BYTE"/"UNSIGNED_BYTE"/"SHORT"/"UNSIGNED_SHORT"/"INT"/"UNSIGNED_INT"/
+        // "FLOAT"/"DOUBLE")，不是 glTF accessor 的数字枚举。早期实现写成 5124/5126/
+        // 5128，CesiumJS 的 parseBatchTable 用字符串 switch 解析 → 得到 undefined
+        // 组件类型 → createArrayBufferView(undefined,…) → 读 undefined.buffer，
+        // 整个 b3dm 加载失败（viewer 报 “Cannot read properties of undefined”）。
+        const char* compTypeName = nullptr; size_t alignTo = 0; const char* typeName = "";
         bool binaryEligible = (ci.present == rows.size()) &&
                               !ci.boolSeen && !ci.nonFinite;
         if (binaryEligible)
@@ -913,15 +920,15 @@ bool BatchTableWriter::Build(const std::vector<std::shared_ptr<const BimProperty
             switch (ci.widest)
             {
             case BimValue::Type::Int32:
-                compType = 5124; alignTo = 4; typeName = "SCALAR"; break;   // INT
+                compTypeName = "INT"; alignTo = 4; typeName = "SCALAR"; break;
             case BimValue::Type::Int64:
-                if (!ci.int64Beyond32) { compType = 5124; alignTo = 4; typeName = "SCALAR"; }
+                if (!ci.int64Beyond32) { compTypeName = "INT"; alignTo = 4; typeName = "SCALAR"; }
                 else binaryEligible = false;                                // -> JSON (exact digits)
                 break;
             case BimValue::Type::Double:
-                compType = 5128; alignTo = 8; typeName = "SCALAR"; break;   // DOUBLE
+                compTypeName = "DOUBLE"; alignTo = 8; typeName = "SCALAR"; break;
             case BimValue::Type::Vec3:
-                compType = 5126; alignTo = 4; typeName = "VEC3"; break;     // VEC3/FLOAT
+                compTypeName = "FLOAT"; alignTo = 4; typeName = "VEC3"; break;
             default:
                 binaryEligible = false; break;
             }
@@ -990,8 +997,8 @@ bool BatchTableWriter::Build(const std::vector<std::shared_ptr<const BimProperty
                 }
             }
             json << "{\"byteOffset\":" << byteOffset
-                 << ",\"componentType\":" << compType
-                 << ",\"type\":\"" << typeName << "\"}";
+                 << ",\"componentType\":\"" << compTypeName
+                 << "\",\"type\":\"" << typeName << "\"}";
         }
         else
         {
