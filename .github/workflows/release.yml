@@ -218,7 +218,7 @@ jobs:
 
           # GDAL 数据目录（可选，个别驱动需要；通过 GDAL_DATA 环境变量启用）
           $gdalData = Join-Path $installedRoot 'share\gdal'
-          if (Test-Path $gdalData) { Copy-Item $gdalData "$stage\gdaldata" -Recurse -Exclude cmake, *.cmake }
+          if (Test-Path $gdalData) { Copy-Item $gdalData "$stage\gdaldata" -Recurse -Exclude cmake, *.cmake, vcpkg* }
 
           @"
           MGO $env:VER - Windows x64
@@ -286,19 +286,6 @@ jobs:
           Full license texts are available at the upstream URLs above and in the
           source tree of each component.
           EOF
-
-      # 一次性：v0.8.0 重剪裁（版本串 bump + Windows 包剔除 debug 产物）。
-      # 删 tag 时旧 Release 已转草稿且带旧资产，先整单删除再重新发布，
-      # 避免同名资产冲突。发布验证通过后此步骤会被还原移除。
-      - name: "One-off cleanup: drop stale v0.8.0 draft release before re-publish"
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release delete v0.8.0 --repo "$GITHUB_REPOSITORY" --yes; then
-            echo "stale v0.8.0 draft release deleted"
-          else
-            echo "::warning::v0.8.0 release delete failed or already gone"
-          fi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
