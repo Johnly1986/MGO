@@ -245,9 +245,10 @@ else()
     add_compile_options(-Wall -Wno-unused-parameter -Wno-unused-variable)
 endif()
 
-# ---- MGO software version (v1.0.0) ----
-set(MGO_VERSION_MAJOR 1)
-set(MGO_VERSION_MINOR 0)
+# ---- MGO software version (v0.8.0) ----
+# Keep in sync with MGOVersion.h (console banner / Windows VERSIONINFO).
+set(MGO_VERSION_MAJOR 0)
+set(MGO_VERSION_MINOR 8)
 set(MGO_VERSION_PATCH 0)
 set(MGO_VERSION "${MGO_VERSION_MAJOR}.${MGO_VERSION_MINOR}.${MGO_VERSION_PATCH}")
 set(MGO_SOVERSION ${MGO_VERSION_MAJOR})
@@ -256,7 +257,7 @@ set(MGO_SOVERSION ${MGO_VERSION_MAJOR})
 #   Windows   : MGOVersion.rc is compiled into the DLL (VERSIONINFO incl.
 #               Legal Copyright) — VERSION is NOT set here because MSVC would
 #               then auto-generate a second, copyright-free version resource.
-#   Linux/mac : VERSION/SOVERSION produce the SONAME lib<mod>.so.1.0.0.
+#   Linux/mac : VERSION/SOVERSION produce the SONAME lib<mod>.so.<SOVERSION>.
 function(mgo_set_library_version target)
     if(WIN32)
         target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/MGOVersion.rc)

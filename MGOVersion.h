@@ -9,16 +9,16 @@
 #ifndef MGO_VERSION_H
 #define MGO_VERSION_H
 
-#define MGO_VERSION_MAJOR 1
-#define MGO_VERSION_MINOR 0
+#define MGO_VERSION_MAJOR 0
+#define MGO_VERSION_MINOR 8
 #define MGO_VERSION_PATCH 0
 
 // Dot-separated string, e.g. "1.0.0" (console banner + VERSIONINFO strings).
-#define MGO_VERSION_STRING "1.0.0"
+#define MGO_VERSION_STRING "0.8.0"
 
 // Comma-separated numeric form for Windows VERSIONINFO FILEVERSION /
 // PRODUCTVERSION (consumed by rc.exe / windres only).
-#define MGO_VERSION_FILE 1,0,0,0
+#define MGO_VERSION_FILE 0,8,0,0
 
 #define MGO_COPYRIGHT_STRING "Copyright Johnlyon"
 
