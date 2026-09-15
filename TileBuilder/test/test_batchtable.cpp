@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 
 using std::cout;
@@ -169,9 +170,9 @@ static void TestBatchTableThreeState()
     // NaN/±Inf -> null + demoted to JSON + counted (review #3)
     std::vector<std::shared_ptr<const BimPropertyRow>> nrows;
     nrows.push_back(std::make_shared<BimPropertyRow>(BimPropertyRow{
-        { "vol", BimValue::MakeDouble(0.0 / 0.0) }, { "k", BimValue::MakeInt32(1) } }));
+        { "vol", BimValue::MakeDouble(std::numeric_limits<double>::quiet_NaN()) }, { "k", BimValue::MakeInt32(1) } }));
     nrows.push_back(std::make_shared<BimPropertyRow>(BimPropertyRow{
-        { "vol", BimValue::MakeDouble(1.0 / 0.0) }, { "k", BimValue::MakeInt32(2) } }));
+        { "vol", BimValue::MakeDouble(std::numeric_limits<double>::infinity()) }, { "k", BimValue::MakeInt32(2) } }));
     std::string j7; std::vector<uint8_t> b7;
     size_t nullified7 = 0;
     CHECK(BatchTableWriter::Build(nrows, j7, b7, &nullified7));
