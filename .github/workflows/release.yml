@@ -282,6 +282,18 @@ jobs:
           source tree of each component.
           EOF
 
+      # 一次性清理：v8.0.0 -> v0.8.0 改标后，删除遗留的 v8.0.0 草稿 Release
+      # 及其残留 tag（发布验证通过后此步骤会被还原移除）。
+      - name: One-off cleanup: drop superseded v8.0.0 draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release delete v8.0.0 --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag; then
+            echo "v8.0.0 draft release deleted"
+          else
+            echo "::warning::v8.0.0 release delete failed or already gone"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
