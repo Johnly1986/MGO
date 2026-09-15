@@ -77,9 +77,10 @@ jobs:
           STAGE="dist/$DIR"
           mkdir -p "$STAGE"
 
-          # 主程序 + 本项目共享库（cp -L 解引用 SONAME 符号链接）
+          # 主程序 + 本项目共享库（cp -L 解引用 SONAME 符号链接；
+          # glob 版本无关，SOVERSION 随 MGO_VERSION_MAJOR 变化不再漏拷）
           cp -L build/bin/MGOConsole "$STAGE/"
-          cp -L build/lib*.so.1       "$STAGE/"
+          cp -L build/lib*.so.*      "$STAGE/"
 
           # FetchContent 构建出的 assimp（非系统库，必须随包携带）。
           # 路径不硬编码：用 ldd 查询 MGOConsole 实际解析到的 libassimp，
@@ -194,9 +195,11 @@ jobs:
           $stage = "dist\$dir"
           New-Item -ItemType Directory -Force $stage | Out-Null
 
-          # 主程序 + 本项目 DLL + assimp DLL（递归搜索 build 树，兼容多配置布局）
+          # 主程序 + 本项目 DLL + assimp DLL（递归搜索 build 树，兼容多配置布局）。
+          # 排除 \debug\ 目录：vcpkg_installed\x64-windows\debug\bin 下的调试版
+          # DLL（gdald.dll 46MB 等，/MDd 链接）不可分发且占包一半体积
           Get-ChildItem -Recurse build -Include 'MGOConsole.exe','*.dll' |
-            Where-Object { $_.FullName -notmatch '\\CMakeFiles\\|compilerId' } |
+            Where-Object { $_.FullName -notmatch '\\CMakeFiles\\|compilerId|\\debug\\' } |
             Copy-Item -Destination $stage
 
           # PROJ 数据库：MGO 运行时优先在 exe 同目录查找 proj.db，直接放包根即可。
@@ -209,11 +212,13 @@ jobs:
           # vcpkg 依赖运行时 DLL（PROJ / GDAL / Boost / TIFF / JPEG / PNG / zlib ...）
           Copy-Item (Join-Path $installedRoot 'bin\*.dll') $stage
 
-          Copy-Item (Join-Path $projShare '*') $stage
+          # proj 数据放包根（proj.db 必需）；排除 vcpkg 的 cmake 配置与
+          # 清单残留（proj*-targets*.cmake / vcpkg*.json 等，运行时无用）
+          Copy-Item (Join-Path $projShare '*') $stage -Exclude *.cmake, cmake, vcpkg*
 
           # GDAL 数据目录（可选，个别驱动需要；通过 GDAL_DATA 环境变量启用）
           $gdalData = Join-Path $installedRoot 'share\gdal'
-          if (Test-Path $gdalData) { Copy-Item $gdalData "$stage\gdaldata" -Recurse }
+          if (Test-Path $gdalData) { Copy-Item $gdalData "$stage\gdaldata" -Recurse -Exclude cmake, *.cmake }
 
           @"
           MGO $env:VER - Windows x64
@@ -281,6 +286,19 @@ jobs:
           Full license texts are available at the upstream URLs above and in the
           source tree of each component.
           EOF
+
+      # 一次性：v0.8.0 重剪裁（版本串 bump + Windows 包剔除 debug 产物）。
+      # 删 tag 时旧 Release 已转草稿且带旧资产，先整单删除再重新发布，
+      # 避免同名资产冲突。发布验证通过后此步骤会被还原移除。
+      - name: "One-off cleanup: drop stale v0.8.0 draft release before re-publish"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release delete v0.8.0 --repo "$GITHUB_REPOSITORY" --yes; then
+            echo "stale v0.8.0 draft release deleted"
+          else
+            echo "::warning::v0.8.0 release delete failed or already gone"
+          fi
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
