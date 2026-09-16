@@ -360,6 +360,19 @@ jobs:
           source tree of each component.
           EOF
 
+      # 一次性：v0.8.0 再次重剪裁（Linux 包自包含）。删 tag 时旧 Release 已转
+      # 草稿且带旧资产，先整单删除再重新发布，避免同名资产冲突。
+      # 发布验证通过后此步骤会被还原移除。
+      - name: "One-off cleanup: drop stale v0.8.0 draft release before re-publish"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release delete v0.8.0 --repo "$GITHUB_REPOSITORY" --yes; then
+            echo "stale v0.8.0 draft release deleted"
+          else
+            echo "::warning::v0.8.0 release delete failed or already gone"
+          fi
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
