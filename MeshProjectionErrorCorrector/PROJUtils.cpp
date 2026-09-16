@@ -62,6 +62,10 @@ std::string FindPROJDatabase()
 #endif
         if (hasProjDb(exeDir))
             return exeDir;
+        // Self-contained bundle layout (MGO Release linux tar.gz / MGOServer
+        // pack-engine): <exeDir>/share/proj/proj.db — see PROJUtils.h
+        if (hasProjDb(exeDir + "/share/proj"))
+            return exeDir + "/share/proj";
     }
 
     // 2) PROJ_LIB env var (allows runtime override of compile-time path)

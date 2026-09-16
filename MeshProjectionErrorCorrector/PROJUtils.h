@@ -14,10 +14,12 @@
 // Find the PROJ database directory (containing proj.db) at runtime.
 //
 // Search order (cross-platform):
-//   1) Executable-relative:   <exeDir>/proj.db
-//   2) PROJ_LIB environment variable (allows runtime override)
-//   3) MGO_PROJ_DB_DIR compiled in at CMake time
-//   4) System/vcpkg common paths
+//   1) Executable-relative flat: <exeDir>/proj.db
+//   2) Executable-relative bundle: <exeDir>/share/proj/proj.db
+//      (self-contained release layout; engine-env injects PROJ_DATA here)
+//   3) PROJ_LIB environment variable (allows runtime override)
+//   4) MGO_PROJ_DB_DIR compiled in at CMake time
+//   5) System/vcpkg common paths
 //
 // Returns the directory path (without trailing separator), or empty string.
 std::string FindPROJDatabase();
