@@ -97,12 +97,85 @@ jobs:
           echo "assimp lib: $ASSIMP"
           cp -L "$ASSIMP" "$STAGE/libassimp.so.6"
 
-          # 统一设置 RUNPATH 为 $ORIGIN，解压即可运行（PROJ/GDAL/OSG 走系统库）
-          for f in "$STAGE"/MGOConsole "$STAGE"/*.so*; do
+          # ---- OSG 插件目录：osgdb_* 由 dlopen 加载，ldd 闭包看不到，须单独搬运。
+          # OSG 按 <libosg 所在目录>/osgPlugins-<ver> 自动发现插件，随包布局不变即可用。
+          OSGPLUG=$(ldd build/bin/MGOConsole 2>/dev/null | awk '/libosg/ {print $3; exit}')
+          if [ -n "$OSGPLUG" ] && [ -e "$OSGPLUG" ]; then
+            for PDIR in "$(dirname "$OSGPLUG")"/osgPlugins-*; do
+              if [ -d "$PDIR" ]; then
+                cp -r "$PDIR" "$STAGE/"
+                echo "osg plugins: $PDIR"
+              fi
+            done
+          fi
+
+          # ---- ldd 闭包收集：系统 GIS 库随包携带（解压即用，不再要求
+          # 客户机 apt 安装 libgdal/libproj/OSG 等）。MGOConsole 的 DT_NEEDED
+          # 传递闭包 ldd 一次即可解析完整（加载器语义），再逐个补扫 staged
+          # 库与 OSG 插件兜底。排除 glibc 核心 / libstdc++ / libgcc_s：任何
+          # 目标机必有，且与构建机 glibc 版本耦合，搬运反而有害。
+          SEEN=$(mktemp); : > "$SEEN"
+          for BIN in "$STAGE/MGOConsole" "$STAGE"/*.so* "$STAGE"/osgPlugins-*/*.so; do
+            [ -e "$BIN" ] || continue
+            while read -r SO; do
+              case "$SO" in
+                */ld-linux*|*/libc.so.*|*/libm.so.*|*/libdl*|*/libpthread*|*/librt.so*|*/libresolv*|*/libstdc++*|*/libgcc_s*) continue ;;
+              esac
+              if grep -qxF "$SO" "$SEEN"; then continue; fi
+              echo "$SO" >> "$SEEN"
+              # 防御：ldd 可能报出 ld.so.preload 占位项（如 /$LIB/libonion.so）
+              # 或解析不到的路径，非本包闭包内的硬依赖，跳过
+              if [ ! -e "$SO" ]; then
+                echo "skip (not a real file): $SO"
+                continue
+              fi
+              if [ ! -e "$STAGE/$(basename "$SO")" ]; then
+                cp -L "$SO" "$STAGE/"
+              fi
+            done < <(ldd "$BIN" 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i ~ /^\//) print $i}')
+          done
+          rm -f "$SEEN"
+          echo "bundled libs: $(ls "$STAGE"/*.so* | wc -l) (+ osg plugins: $(ls "$STAGE"/osgPlugins-*/*.so 2>/dev/null | wc -l))"
+
+          # ---- PROJ 数据随包（proj.db 必需）：<exeDir>/share/proj 布局，
+          # 运行时 FindPROJDatabase 与 MGOServer engineEnv 均按此发现；
+          # proj.db 引用的格网文件按数据库同目录解析，全量拷贝保证行为
+          # 与系统安装一致。
+          if [ -d /usr/share/proj ]; then
+            mkdir -p "$STAGE/share"
+            cp -r /usr/share/proj "$STAGE/share/proj"
+            # 防御性清理非运行时文件（apt 包内通常本就没有 cmake 残留）
+            rm -rf "$STAGE/share/proj/cmake"
+            find "$STAGE/share/proj" -name '*.cmake' -delete
+          else
+            echo "::error::/usr/share/proj not found (proj-data package missing?)"
+            exit 1
+          fi
+
+          # 统一设置 RUNPATH 为 $ORIGIN：主程序、本项目库、收集的系统库、
+          # OSG 插件互相从同目录解析，解压即可运行
+          for f in "$STAGE"/MGOConsole "$STAGE"/*.so* "$STAGE"/osgPlugins-*/*.so; do
+            [ -e "$f" ] || continue
             patchelf --set-rpath '$ORIGIN' "$f"
           done
 
-          # 自检
+          # 自检 1：依赖闭包完整（禁止任何 not found）
+          if ldd "$STAGE/MGOConsole" 2>&1 | grep -q "not found"; then
+            ldd "$STAGE/MGOConsole" 2>&1 | grep "not found"
+            echo "::error::dependency closure incomplete (see above)"
+            exit 1
+          fi
+
+          # 自检 2：PROJ 数据库必须解析到包内 share/proj（--proj-test 走
+          # FindPROJDatabase 完整链路并做一次真实 EPSG 变换）
+          PROJDB=$("$STAGE/MGOConsole" --proj-test 2>&1 | grep -oE 'database: .*')
+          case "$PROJDB" in
+            *"MGO-${VER}-linux-x64/share/proj"*) echo "proj db: $PROJDB" ;;
+            "") echo "::error::--proj-test produced no database line"; exit 1 ;;
+            *) echo "::error::PROJ db resolved outside bundle: $PROJDB"; exit 1 ;;
+          esac
+
+          # 自检 3：主程序自报版本
           "$STAGE/MGOConsole" --version
 
           tar -czf "dist/${DIR}.tar.gz" -C dist "$DIR"
